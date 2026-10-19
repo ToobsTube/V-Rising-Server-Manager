@@ -4,7 +4,7 @@ A lightweight GUI for managing your V Rising dedicated server on Windows.
 
 **Version 1.0.0** · By [ToobsTube]
 
-Also available as a standalone exe on [Nexus Mods](https://www.nexusmods.com) — no Python required.
+Also available as a standalone exe — no Python required.
 
 ---
 
@@ -19,7 +19,7 @@ V Rising Server Manager gives server owners a clean, simple interface for everyt
 This repository contains the Python source. Two versions are available:
 
 - **Standalone exe** — Packages everything into a single executable. No Python installation required. Recommended for most people.
-- **Python script (this repo)** — Run `vrising_manager.py` directly if you already have Python installed or want to inspect, fork, or modify the code.
+- **Python script** — Run `vrising_manager.py` directly if you already have Python installed or want to inspect, fork, or modify the code.
 
 Both versions are identical in features.
 
@@ -100,4 +100,4 @@ Five built-in color themes: Dark Blue (default), Dark Green, Dark Red, Midnight 
 
 ---
 
-*Created by [ToobsTube](https://www.nexusmods.com/profile/ToobsTube) · Not affiliated with Stunlock Studios*
+*Created by [ToobsTube] · Not affiliated with Stunlock Studios*
