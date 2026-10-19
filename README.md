@@ -92,6 +92,34 @@ Five built-in color themes: Dark Blue (default), Dark Green, Dark Red, Midnight 
 
 ---
 
+## Enabling RCON
+
+RCON is required for in-game announcements (restart warnings). Without it the manager will still start, stop, and monitor your server — you just won't get the countdown messages sent to players.
+
+To enable RCON, open your server's `ServerHostSettings.json` file. It's located in your server's `Settings` folder:
+
+```
+<server folder>\save-data\Settings\ServerHostSettings.json
+```
+
+Find the `Rcon` section and set these three values:
+
+```json
+"Rcon": {
+  "Enabled": true,
+  "Password": "your_password_here",
+  "Port": 25575
+}
+```
+
+- **Enabled** — must be `true`
+- **Password** — set something reasonably strong; this is how the manager authenticates
+- **Port** — `25575` is the default; change it only if something else is using that port
+
+Enter the same password and port in the manager's **Setup tab** under the RCON section. Changes take effect the next time the server starts.
+
+---
+
 ## Version History
 
 | Version | Notes |
