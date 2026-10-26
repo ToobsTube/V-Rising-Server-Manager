@@ -2768,32 +2768,13 @@ class VRisingManager(tk.Tk):
     # ── Admin list file management ───────────────────────────────────────────
     def _get_adminlist_path(self):
         """
-        Find the correct adminlist.txt location.
-        V Rising checks several locations — we write to whichever already exists,
-        or fall back to save-data/Settings which is the recommended persistent location.
+        adminlist.txt in save-data/Settings, the persistent location that survives
+        server updates. An existing list in an older location is copied there first.
         """
         base = self.cfg.get("server_path", "").strip()
         if not base:
             return None
-        base = os.path.normpath(base)
-
-        candidates = [
-            # Persistent data path — recommended, survives server updates
-            os.path.join(base, "save-data", "Settings", "adminlist.txt"),
-            # AppData location
-            os.path.expandvars(
-                r"%USERPROFILE%\AppData\LocalLow\Stunlock Studios\VRisingServer\Settings\adminlist.txt"),
-            # StreamingAssets — default template location, overwritten by updates
-            os.path.join(base, "VRisingServer_Data", "StreamingAssets", "Settings", "adminlist.txt"),
-        ]
-
-        # Return the first one that already exists
-        for path in candidates:
-            if os.path.isfile(path):
-                return path
-
-        # None exist yet — return the preferred persistent location
-        return candidates[0]
+        return os.path.join(self._ensure_persistent_settings(base), "adminlist.txt")
 
     def _load_adminlist(self):
         path = self._get_adminlist_path()
@@ -4268,6 +4249,30 @@ class VRisingManager(tk.Tk):
                 pass
         return {}
 
+    def _ensure_persistent_settings(self, base):
+        """Make sure the server's settings files are in save-data\\Settings and return
+        that folder. We start the server with -persistentDataPath save-data, so it reads
+        its settings there, and game updates never touch it. Updates DO replace
+        StreamingAssets\\Settings, so any file that's only there (or in AppData) is
+        copied over first, keeping anything that was set by hand."""
+        settings_dir = os.path.join(os.path.normpath(base), "save-data", "Settings")
+        if not os.path.isdir(base):
+            return settings_dir
+        os.makedirs(settings_dir, exist_ok=True)
+        older_dirs = [d for d in self._find_settings_dirs()
+                      if os.path.normcase(d) != os.path.normcase(settings_dir)]
+        for name in ("ServerHostSettings.json", "ServerGameSettings.json",
+                     "adminlist.txt", "banlist.txt"):
+            dest = os.path.join(settings_dir, name)
+            if os.path.isfile(dest):
+                continue
+            for d in older_dirs:
+                src = os.path.join(d, name)
+                if os.path.isfile(src):
+                    shutil.copy2(src, dest)
+                    break
+        return settings_dir
+
     # ── Write ServerGameSettings.json / ServerHostSettings.json ─────────────
     def _write_server_settings(self):
         """
@@ -4279,17 +4284,8 @@ class VRisingManager(tk.Tk):
         if not base:
             return
 
-        # Write to whichever Settings folder already has the files,
-        # falling back to save-data\Settings if none exist yet.
-        settings_dir = None
-        for d in self._find_settings_dirs():
-            if os.path.isfile(os.path.join(d, "ServerHostSettings.json")) or \
-               os.path.isfile(os.path.join(d, "ServerGameSettings.json")):
-                settings_dir = d
-                break
-        if not settings_dir:
-            settings_dir = os.path.join(base, "save-data", "Settings")
-        os.makedirs(settings_dir, exist_ok=True)
+        # Always save-data\Settings, where game updates can't reset them
+        settings_dir = self._ensure_persistent_settings(base)
 
         # ── ServerGameSettings.json ──────────────────────────────────────────
         game_path = os.path.join(settings_dir, "ServerGameSettings.json")
