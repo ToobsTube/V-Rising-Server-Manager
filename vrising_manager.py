@@ -8,18 +8,27 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import subprocess
 import threading
+import ctypes
+import sys
 import os
 import json
 import time
 import psutil
 import socket
+import ipaddress
+import urllib.request
 import struct
 import shutil
 import re
 from datetime import datetime, timedelta
 
 # ── Profile / config system ─────────────────────────────────────────────────
-_SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
+# Settings live next to the manager. In the built .exe, __file__ points into a temporary
+# folder that's deleted on exit, so use the .exe's own folder instead.
+if getattr(sys, "frozen", False):
+    _SCRIPT_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILES_DIR  = os.path.join(_SCRIPT_DIR, "vrising_profiles")
 # Legacy single-file config — migrated automatically on first run
 LEGACY_CONFIG = os.path.join(_SCRIPT_DIR, "vrising_manager_config.json")
@@ -134,6 +143,110 @@ DEFAULT_CONFIG = {
 }
 
 SERVER_EXE = "VRisingServer.exe"
+APP_VERSION = "1.1.0"   # keep in step with README.md and the GitHub release tag
+
+# How long a graceful stop waits for the server to save and exit before force-killing it
+GRACEFUL_STOP_TIMEOUT = 120
+SAVE_START_LINE = "Saving the world on exit"
+SAVE_DONE_LINE  = "Finished saving the world on exit"
+
+
+def _send_ctrl_c_to_console(pid):
+    """Helper mode (--send-ctrl-c <pid>): press Ctrl+C in the server's console window.
+    A process can only send console events to the console it's attached to, so this runs
+    in its own short-lived process that attaches to the server's console.
+    Exit code: 0 = sent, 1 = couldn't attach to the console, 2 = couldn't send."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.FreeConsole()
+    if not kernel32.AttachConsole(pid):
+        return 1
+    kernel32.SetConsoleCtrlHandler(None, True)    # ignore the Ctrl+C ourselves
+    ok = kernel32.GenerateConsoleCtrlEvent(0, 0)  # CTRL_C_EVENT to every process on this console
+    time.sleep(0.5)                               # let it be delivered before we detach
+    kernel32.FreeConsole()
+    return 0 if ok else 2
+
+
+def _ctrl_c_helper_cmd(pid):
+    """Command line that runs this manager in --send-ctrl-c helper mode."""
+    if getattr(sys, "frozen", False):   # built .exe
+        return [sys.executable, "--send-ctrl-c", str(pid)]
+    return [sys.executable, os.path.abspath(__file__), "--send-ctrl-c", str(pid)]
+
+
+# ── Connection check helpers ─────────────────────────────────────────────────
+VRISING_APP_ID = 1604030
+
+
+def _a2s_info(host, port, timeout=3.0):
+    """Ask a server for its details the way the Steam server browser does (A2S_INFO on the
+    query port). Returns (info dict, reply time in ms). Raises OSError if there's no answer."""
+    request = b"\xFF\xFF\xFF\xFFTSource Engine Query\x00"
+    payload = request
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.settimeout(timeout)
+        for _ in range(3):
+            start = time.perf_counter()
+            s.sendto(payload, (host, port))
+            data, _ = s.recvfrom(4096)
+            ms = (time.perf_counter() - start) * 1000
+            kind = data[4:5]
+            if kind == b"A":    # challenge — ask again with it attached
+                payload = request + data[5:9]
+                continue
+            if kind == b"I":
+                return _parse_a2s_info(data[5:]), ms
+            raise OSError("unexpected reply from server")
+    raise OSError("server kept sending challenges")
+
+
+def _parse_a2s_info(d):
+    pos = 1   # skip protocol version
+
+    def cstr():
+        nonlocal pos
+        end = d.index(b"\x00", pos)
+        s = d[pos:end].decode("utf-8", "replace")
+        pos = end + 1
+        return s
+
+    name = cstr()
+    cstr(); cstr(); cstr()          # map, folder, game
+    pos += 2                        # app id
+    players, max_players = d[pos], d[pos + 1]
+    pos += 7                        # players, max, bots, type, environment, visibility, VAC
+    version = cstr()
+    return {"name": name, "players": players, "max_players": max_players, "version": version}
+
+
+def _get_public_ip(timeout=5):
+    """This PC's public (WAN) IPv4 address, from a lookup service. None if offline."""
+    for url in ("https://api.ipify.org", "https://checkip.amazonaws.com"):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as r:
+                return str(ipaddress.IPv4Address(r.read().decode().strip()))
+        except Exception:
+            continue
+    return None
+
+
+def _get_local_ip():
+    """This PC's address on the home network (192.168.x.x etc). Sends nothing."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))   # picks the outgoing network adapter
+            return s.getsockname()[0]
+    except OSError:
+        return None
+
+
+def _steam_listing(ip, timeout=8):
+    """V Rising servers that Steam's server list knows at this IP."""
+    url = f"https://api.steampowered.com/ISteamApps/GetServersAtAddress/v1/?addr={ip}"
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        data = json.load(r)
+    return [s for s in data.get("response", {}).get("servers", [])
+            if s.get("appid") == VRISING_APP_ID]
 
 # ── Color themes ─────────────────────────────────────────────────────────────
 THEMES = {
@@ -272,7 +385,7 @@ class ProfilePicker(tk.Toplevel):
 
     def __init__(self, master):
         super().__init__(master)
-        self.title("V Rising Server Manager — Select Profile")
+        self.title(f"V Rising Server Manager {APP_VERSION} — Select Profile")
         self.resizable(False, False)
         self.configure(bg="#1a1a2e")
         self.chosen = None
@@ -446,7 +559,7 @@ class VRisingManager(tk.Tk):
     def __init__(self, profile_name="Default"):
         super().__init__()
         self.profile_name = profile_name
-        self.title(f"V Rising Server Manager — {profile_name}")
+        self.title(f"V Rising Server Manager {APP_VERSION} — {profile_name}")
         self.resizable(True, True)
         self.minsize(800, 700)
         # Start at a reasonable default — small enough to run multiple side by side
@@ -464,6 +577,7 @@ class VRisingManager(tk.Tk):
         self.monitor_thread = None
         self._running = True
         self._restart_cancel = False
+        self._stopping = False
 
         self._setup_styles()
         self._build_ui()
@@ -480,9 +594,9 @@ class VRisingManager(tk.Tk):
         except AttributeError:
             pass   # path_var not created yet
         if path:
-            self.title(f"V Rising Server Manager — {self.profile_name}  [{path}]")
+            self.title(f"V Rising Server Manager {APP_VERSION} — {self.profile_name}  [{path}]")
         else:
-            self.title(f"V Rising Server Manager — {self.profile_name}")
+            self.title(f"V Rising Server Manager {APP_VERSION} — {self.profile_name}")
         # Update header bar path label
         try:
             self._header_path_lbl.config(text=path if path else "")
@@ -538,7 +652,9 @@ class VRisingManager(tk.Tk):
         header = tk.Frame(self, bg=self.ACCENT2, pady=10)
         header.pack(fill="x")
         tk.Label(header, text="⚔  V Rising Server Manager",
-                 bg=self.ACCENT2, fg=self.TEXT, font=("Segoe UI", 14, "bold")).pack(side="left", padx=16)
+                 bg=self.ACCENT2, fg=self.TEXT, font=("Segoe UI", 14, "bold")).pack(side="left", padx=(16, 4))
+        tk.Label(header, text=f"v{APP_VERSION}",
+                 bg=self.ACCENT2, fg=self.TEXT_DIM, font=("Segoe UI", 8)).pack(side="left", anchor="s", pady=(0, 3))
 
         # Path label — centre of header, updates when path changes
         self._header_path_lbl = tk.Label(header, text="",
@@ -1181,6 +1297,7 @@ class VRisingManager(tk.Tk):
             return
 
         # Warn if server appears to be running
+        need_stop = False
         if self.server_process or self._find_server_process():
             if not messagebox.askyesno("Server Is Running",
                 "The server appears to be running.\n\n"
@@ -1188,8 +1305,7 @@ class VRisingManager(tk.Tk):
                 "update files that are currently in use.\n\n"
                 "Stop the server now and continue?"):
                 return
-            self._stop_server()
-            time.sleep(2)  # Give it a moment to fully close
+            need_stop = True   # stopped (with a world save) in the install thread below
 
         os.makedirs(install_dir, exist_ok=True)
         self.setup_install_btn.config(state="disabled")
@@ -1237,6 +1353,24 @@ class VRisingManager(tk.Tk):
 
         def do_install():
             try:
+                if need_stop:
+                    self.after(0, lambda: self._set_status("stopping"))
+                    self.after(0, lambda: self._setup_log("Stopping the server (saving the world first)...\n"))
+                    result = self._stop_server_blocking(
+                        lambda m: self.after(0, lambda m=m: self._setup_log(f"  {m}\n")))
+                    if result == "failed":
+                        self.after(0, lambda: self._set_status("running"))
+                        self.after(0, lambda: self._setup_log(
+                            "\n✗ Could not stop the server. Close its console window manually, then try again.\n"))
+                        return
+                    self.after(0, lambda: self._set_status("stopped"))
+                    if result == "killed":
+                        self.after(0, lambda: self._setup_log(
+                            "  ⚠ The server had to be force-stopped — the world may not have saved.\n"))
+                    else:
+                        self.after(0, lambda: self._setup_log("  ✓ Server stopped.\n\n"))
+                    time.sleep(2)  # Give it a moment to release its files
+
                 rc = run_steamcmd()
 
                 # Exit code 8 means SteamCMD updated itself — just run it again
@@ -2018,6 +2152,221 @@ class VRisingManager(tk.Tk):
         tk.Label(tab, text=info_text, bg=self.PANEL_BG, fg=self.TEXT_DIM,
                  font=("Segoe UI", 8), justify="left").grid(
             row=7, column=0, columnspan=4, sticky="w", padx=14, pady=4)
+
+        self._build_connection_check(tab, 9)
+
+    # ── Connection check (Network tab) ───────────────────────────────────────
+    def _build_connection_check(self, tab, row):
+        self._section(tab, row, "Connection Check")
+        btn_style = dict(bg=self.ACCENT2, fg=self.TEXT, relief="flat",
+                         font=("Segoe UI", 8), padx=8, pady=2, cursor="hand2")
+        self._public_ip = None
+
+        # Public IP — hidden unless asked for, so it doesn't end up on a stream or screenshot
+        ttk.Label(tab, text="Public IP:").grid(row=row+2, column=0, sticky="w", padx=(10,4), pady=5)
+        pub = tk.Frame(tab, bg=self.PANEL_BG)
+        pub.grid(row=row+2, column=1, columnspan=3, sticky="w", padx=4)
+        self.public_ip_lbl = tk.Label(pub, text="Hidden", bg=self.PANEL_BG, fg=self.TEXT_DIM,
+                                      font=("Consolas", 9), width=22, anchor="w")
+        self.public_ip_lbl.pack(side="left")
+        self.public_ip_copy_btn = tk.Button(pub, text="📋  Copy IP:Port",
+                                            command=self._copy_public_ip, **btn_style)
+        self.public_ip_copy_btn.pack(side="left", padx=(0, 4))
+        self._bind_tooltip(self.public_ip_copy_btn,
+            "Copies your public address and game port for players outside your home "
+            "to use with Direct Connect — without showing it on screen.")
+        self.public_ip_show_btn = tk.Button(pub, text="👁  Show",
+                                            command=self._toggle_public_ip, **btn_style)
+        self.public_ip_show_btn.pack(side="left")
+
+        # Local IP — only means something inside your home, so it's fine to show
+        ttk.Label(tab, text="Local IP:").grid(row=row+3, column=0, sticky="w", padx=(10,4), pady=5)
+        loc = tk.Frame(tab, bg=self.PANEL_BG)
+        loc.grid(row=row+3, column=1, columnspan=3, sticky="w", padx=4)
+        self.local_ip_lbl = tk.Label(loc, text=_get_local_ip() or "Unknown", bg=self.PANEL_BG,
+                                     fg=self.TEXT, font=("Consolas", 9), width=22, anchor="w")
+        self.local_ip_lbl.pack(side="left")
+        self.local_ip_copy_btn = tk.Button(loc, text="📋  Copy IP:Port",
+                                           command=self._copy_local_ip, **btn_style)
+        self.local_ip_copy_btn.pack(side="left")
+        self._bind_tooltip(self.local_ip_copy_btn,
+            "For players in your home: Direct Connect to this address and tick 'LAN Server'.")
+
+        chk = tk.Frame(tab, bg=self.PANEL_BG)
+        chk.grid(row=row+4, column=0, columnspan=4, sticky="w", padx=10, pady=(8, 4))
+        self.conn_check_btn = tk.Button(chk, text="🔍  Run Connection Check",
+                                        command=self._run_connection_check,
+                                        bg=self.ACCENT2, fg=self.TEXT, relief="flat",
+                                        font=("Segoe UI", 9, "bold"), padx=12, pady=4,
+                                        cursor="hand2")
+        self.conn_check_btn.pack(side="left")
+        self.conn_check_status = tk.Label(chk, text="", bg=self.PANEL_BG, fg=self.TEXT_DIM,
+                                          font=("Segoe UI", 8))
+        self.conn_check_status.pack(side="left", padx=8)
+
+        self.conn_results = tk.Frame(tab, bg=self.PANEL_BG)
+        self.conn_results.grid(row=row+5, column=0, columnspan=4, sticky="w", padx=14, pady=(0, 10))
+
+    def _ports(self):
+        try:
+            game_port = int(self.game_port_var.get())
+        except Exception:
+            game_port = self.cfg.get("game_port", 9876)
+        try:
+            query_port = int(self.query_port_var.get())
+        except Exception:
+            query_port = self.cfg.get("query_port", 9877)
+        return game_port, query_port
+
+    def _flash_copied(self, btn):
+        old = btn.cget("text")
+        btn.config(text="✓  Copied!")
+        self.after(2000, lambda: btn.config(text=old))
+
+    def _copy_to_clipboard(self, text, btn):
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self._flash_copied(btn)
+
+    def _with_public_ip(self, then):
+        """Call then(ip) on the UI thread, looking the IP up in the background first if needed."""
+        if self._public_ip:
+            then(self._public_ip)
+            return
+
+        def work():
+            ip = _get_public_ip()
+            if ip:
+                self._public_ip = ip
+            self.after(0, lambda: then(ip))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _copy_public_ip(self):
+        def done(ip):
+            if not ip:
+                messagebox.showwarning("Public IP", "Couldn't look up your public IP. Is this PC online?")
+                return
+            self._copy_to_clipboard(f"{ip}:{self._ports()[0]}", self.public_ip_copy_btn)
+        self._with_public_ip(done)
+
+    def _copy_local_ip(self):
+        ip = _get_local_ip()
+        if not ip:
+            messagebox.showwarning("Local IP", "Couldn't find this PC's local IP.")
+            return
+        self.local_ip_lbl.config(text=ip)
+        self._copy_to_clipboard(f"{ip}:{self._ports()[0]}", self.local_ip_copy_btn)
+
+    def _toggle_public_ip(self):
+        if self.public_ip_lbl.cget("text") != "Hidden":
+            self.public_ip_lbl.config(text="Hidden", fg=self.TEXT_DIM)
+            self.public_ip_show_btn.config(text="👁  Show")
+            return
+
+        def done(ip):
+            if not ip:
+                self.public_ip_lbl.config(text="Couldn't look it up", fg=self.ACCENT)
+                return
+            self.public_ip_lbl.config(text=ip, fg=self.TEXT)
+            self.public_ip_show_btn.config(text="🙈  Hide")
+        self._with_public_ip(done)
+
+    def _run_connection_check(self):
+        """Check the server the way players reach it: on this PC, through the public address,
+        and in Steam's server list. Never shows the public IP in the results."""
+        game_port, query_port = self._ports()
+        list_on_steam = bool(self.list_steam_var.get())
+        self.conn_check_btn.config(state="disabled")
+        self.conn_check_status.config(text="Checking…", fg=self.YELLOW)
+        for w in self.conn_results.winfo_children():
+            w.destroy()
+
+        def work():
+            results = []   # (state, text) — state is "ok", "warn" or "bad"
+
+            # 1. Is the server answering at all?
+            info = None
+            for host in ("127.0.0.1", _get_local_ip()):
+                if not host:
+                    continue
+                try:
+                    info, _ = _a2s_info(host, query_port)
+                    break
+                except OSError:
+                    pass
+            if info:
+                results.append(("ok",
+                    f"Server is up: “{info['name']}”, {info['players']}/{info['max_players']} players, "
+                    f"version {info['version']}"))
+            else:
+                results.append(("bad",
+                    f"The server isn't answering on this PC (query port {query_port}). "
+                    "Make sure it's running and has finished loading, then check again."))
+                self.after(0, lambda: show(results))
+                return
+
+            ip = self._public_ip or _get_public_ip()
+            if not ip:
+                results.append(("bad", "Couldn't look up your public IP — is this PC online?"))
+                self.after(0, lambda: show(results))
+                return
+            self._public_ip = ip
+
+            # 2. Through the public address — the way the server list reaches it
+            try:
+                _, ms = _a2s_info(ip, query_port)
+                if ms < 250:
+                    results.append(("ok", f"Reachable through your public address: replied in {ms:.0f} ms."))
+                else:
+                    results.append(("warn",
+                        f"Reachable through your public address, but slow from here ({ms:.0f} ms). "
+                        "Players in your home may need to raise the Latency filter in the server list "
+                        "(or set it to Any) to see the server."))
+            except OSError:
+                results.append(("warn",
+                    "No reply through your public address from this PC. That's common — many home "
+                    "routers can't connect back to themselves — and it doesn't affect players outside "
+                    "your home. Players in your home: loosen the Latency filter in the server list, or "
+                    "Direct Connect to the Local IP above with 'LAN Server' ticked."))
+
+            # 3. Does Steam's server list have it?
+            try:
+                listed = _steam_listing(ip)
+                ports = sorted({s.get("gameport") for s in listed})
+                if game_port in ports:
+                    results.append(("ok",
+                        f"Steam lists the server (game port {game_port}), so players outside your home "
+                        "can find it in the server list."))
+                elif listed:
+                    results.append(("warn",
+                        f"Steam lists a V Rising server at your address on game port "
+                        f"{', '.join(map(str, ports))}, not {game_port}. Check the ports above."))
+                elif not list_on_steam:
+                    results.append(("warn",
+                        "Steam doesn't list the server because 'List on Steam' is off (Server tab). "
+                        "Players will need to Direct Connect — use Copy IP:Port above."))
+                else:
+                    results.append(("bad",
+                        "Steam doesn't list the server yet. If it just started, wait a few minutes and "
+                        f"check again. Otherwise check that UDP ports {game_port} and {query_port} are "
+                        "forwarded on your router to this PC's Local IP."))
+            except Exception:
+                results.append(("warn", "Couldn't reach Steam to check the server list."))
+
+            self.after(0, lambda: show(results))
+
+        def show(results):
+            icons  = {"ok": "✓", "warn": "⚠", "bad": "✗"}
+            colors = {"ok": self.GREEN, "warn": self.YELLOW, "bad": self.ACCENT}
+            for state, text in results:
+                tk.Label(self.conn_results, text=f"{icons[state]}  {text}", bg=self.PANEL_BG,
+                         fg=colors[state], font=("Segoe UI", 8), justify="left",
+                         wraplength=640, anchor="w").pack(fill="x", anchor="w", pady=2)
+            stamp = datetime.now().strftime("%H:%M")
+            self.conn_check_status.config(text=f"Checked at {stamp}", fg=self.TEXT_DIM)
+            self.conn_check_btn.config(state="normal")
+
+        threading.Thread(target=work, daemon=True).start()
 
     # ── Tab: Admin ──────────────────────────────────────────────────────────
     def _build_tab_admin(self):
@@ -2959,12 +3308,26 @@ class VRisingManager(tk.Tk):
             pass  # widgets not ready yet
 
     def _do_restart(self):
-        self._stop_server()
-        time.sleep(2)
-        self._start_server()
-        self.sched_status.config(text="Server restarted ✓", fg=self.GREEN)
-        self.restart_countdown_lbl.config(text="")
-        self.after(4000, self._update_sched_idle_text)
+        def after_stop(result):
+            if result == "failed":
+                self.sched_status.config(
+                    text="Restart failed — the server could not be stopped.", fg=self.ACCENT)
+                self.restart_countdown_lbl.config(text="")
+                return
+            self.after(2000, lambda: start_again(result))
+
+        def start_again(result):
+            self._start_server()
+            if result == "killed":
+                self.sched_status.config(
+                    text="Server restarted, but it had to be force-stopped — world may not have saved.",
+                    fg=self.YELLOW)
+            else:
+                self.sched_status.config(text="Server restarted ✓", fg=self.GREEN)
+            self.restart_countdown_lbl.config(text="")
+            self.after(4000, self._update_sched_idle_text)
+
+        self._stop_server(on_done=after_stop)
 
     # ── Daily Restart methods ────────────────────────────────────────────────
     def _toggle_daily_restart(self):
@@ -3096,11 +3459,32 @@ class VRisingManager(tk.Tk):
                     text="Daily restart running...", fg=self.TEXT_DIM))
                 self._send_rcon_silent("announcerestart")
                 time.sleep(3)
-                self._stop_server()
+                self.after(0, lambda: self._set_status("stopping"))
+                def progress(msg):
+                    self.after(0, lambda m=msg: self.daily_status.config(
+                        text=f"Daily restart: {m}", fg=self.TEXT_DIM))
+                    self.after(0, lambda m=msg: self.status_label.config(text=f"Server: {m}"))
+                result = self._stop_server_blocking(progress)
+                if result == "failed":
+                    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+                    self._write_restart_log(f"FAILED at {ts} — server could not be stopped")
+                    self.after(0, lambda: self._set_status("running"))
+                    self.after(0, lambda: self.daily_status.config(
+                        text="Daily restart failed — the server could not be stopped.", fg=self.ACCENT))
+                    time.sleep(90)
+                    continue
+                self.after(0, lambda: self._set_status("stopped"))
                 time.sleep(5)
                 self._start_server()
                 restart_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-                self._write_restart_log(f"SUCCESS — daily restart completed at {restart_time}")
+                save_note = {
+                    "saved":       "world saved",
+                    "exited":      "server closed, but the save wasn't confirmed in the log",
+                    "killed":      "server was FORCE-STOPPED, world may not have saved",
+                    "not_running": "server had already stopped",
+                }.get(result, result)
+                self._write_restart_log(
+                    f"SUCCESS — daily restart completed at {restart_time} ({save_note})")
                 self.after(0, lambda rt=restart_time: self.daily_status.config(
                     text=f"Last daily restart completed at {rt}. Next at {h:02d}:{m:02d}.",
                     fg=self.GREEN))
@@ -3135,7 +3519,7 @@ class VRisingManager(tk.Tk):
     def _write_restart_log(self, message):
         """Append a timestamped entry to vrising_restart_log.txt next to the manager script."""
         try:
-            log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vrising_restart_log.txt")
+            log_path = os.path.join(_SCRIPT_DIR, "vrising_restart_log.txt")
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(message + "\n")
         except Exception as e:
@@ -4222,6 +4606,13 @@ class VRisingManager(tk.Tk):
         save_config(self.cfg)
         self._write_server_settings()
 
+        # The server inherits "ignore Ctrl+C" from us if whatever launched the manager set it,
+        # and then graceful stop can't reach it — so make sure it's off before starting
+        try:
+            ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False)
+        except Exception:
+            pass
+
         try:
             self.server_process = subprocess.Popen(
                 [exe,
@@ -4236,55 +4627,199 @@ class VRisingManager(tk.Tk):
         except Exception as e:
             messagebox.showerror("Start Failed", f"Could not start server:\n{e}")
 
-    def _stop_server(self):
-        stopped = False
+    def _stop_server(self, on_done=None):
+        """Stop the server gracefully in a background thread so the window stays responsive.
+        on_done(result) runs on the UI thread afterwards (see _stop_server_blocking for results).
+        Without on_done, problems are reported in a message box."""
+        if self._stopping:
+            return
+        self._stopping = True
+        self._set_status("stopping")
 
-        # Method 1: taskkill — works even when psutil can't terminate due to permissions
+        def progress(msg):
+            self.after(0, lambda m=msg: self.status_label.config(text=f"Server: {m}"))
+
+        def work():
+            result = self._stop_server_blocking(progress)
+            self.after(0, lambda: finish(result))
+
+        def finish(result):
+            self._stopping = False
+            if result == "failed":
+                self._set_status("running")
+            else:
+                self.server_process = None
+                self._set_status("stopped")
+            if on_done:
+                on_done(result)
+            elif result == "failed":
+                messagebox.showwarning("Could Not Stop",
+                    "Could not stop the server automatically.\n\n"
+                    "Please close the server console window manually,\n"
+                    "then try again.")
+            elif result == "killed":
+                messagebox.showwarning("Server Force-Stopped",
+                    "The server didn't shut down on its own, so it was force-stopped.\n\n"
+                    "The world may not have saved — anything since the last\n"
+                    "autosave could be lost.")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _server_pid(self):
+        """PID of the server this profile manages, or None if it isn't running."""
+        proc = self.server_process
         try:
-            result = subprocess.run(
-                ["taskkill", "/F", "/IM", SERVER_EXE],
-                capture_output=True, text=True, timeout=10
-            )
-            if result.returncode == 0:
-                stopped = True
-            elif "not found" in result.stderr.lower() or "no tasks" in result.stdout.lower():
-                # Process wasn't running — that's fine
-                stopped = True
+            if isinstance(proc, psutil.Process):
+                if proc.is_running():
+                    return proc.pid
+            elif proc is not None and proc.poll() is None:
+                return proc.pid
         except Exception:
             pass
+        found = self._find_server_process()
+        return found.pid if found else None
 
-        # Method 2: psutil fallback if taskkill didn't work
-        if not stopped:
-            for proc in psutil.process_iter(["pid", "name", "exe"]):
-                try:
-                    name = (proc.info["name"] or "").lower()
-                    exe  = (proc.info["exe"]  or "").lower()
-                    if "vrisingserver" in name or "vrisingserver" in exe:
-                        for child in proc.children(recursive=True):
-                            child.kill()
-                        proc.kill()
-                        stopped = True
-                        break
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
+    def _stop_server_blocking(self, progress=None, timeout=GRACEFUL_STOP_TIMEOUT):
+        """Stop the server and let it save the world first. Blocks, so call it from a worker thread.
+        Presses Ctrl+C in the server console (via the --send-ctrl-c helper), waits for the process
+        to exit, and only force-kills it if it's still running after `timeout` seconds.
+        progress(msg) is called from this thread with short status messages.
+        Returns "saved", "exited" (closed, but the save line wasn't seen in the log),
+        "killed" (forced — world may not have saved), "failed" or "not_running"."""
+        def report(msg):
+            if progress:
+                progress(msg)
 
-        # Method 3: stored subprocess handle fallback
-        if not stopped and self.server_process:
+        pid = self._server_pid()
+        if pid is None:
+            return "not_running"
+        try:
+            proc = psutil.Process(pid)
+        except psutil.NoSuchProcess:
+            return "not_running"
+
+        self._stopping = True
+        try:
+            # Remember where the log ends so we only look at what the shutdown writes
+            log_path = os.path.join(self.cfg.get("server_path", ""), "logs", "VRisingServer.log")
             try:
-                self.server_process.kill()
-                stopped = True
+                log_pos = os.path.getsize(log_path)
+            except OSError:
+                log_pos = None
+            log_tail = ""
+            save_started = save_done = False
+
+            def read_log():
+                nonlocal log_pos, log_tail, save_started, save_done
+                if log_pos is None:
+                    return
+                try:
+                    if os.path.getsize(log_path) < log_pos:
+                        log_pos = 0   # log was replaced
+                    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                        f.seek(log_pos)
+                        new = f.read()
+                        log_pos = f.tell()
+                except OSError:
+                    return
+                text = log_tail + new
+                log_tail = text[-200:]   # keep a bit in case a line is split between reads
+                if SAVE_START_LINE in text:
+                    save_started = True
+                if SAVE_DONE_LINE in text:
+                    save_done = True
+
+            report("Asking the server to save and shut down…")
+            sent = False
+            try:
+                rc = subprocess.run(_ctrl_c_helper_cmd(pid), timeout=30,
+                                    creationflags=subprocess.CREATE_NO_WINDOW).returncode
+                sent = rc == 0
             except Exception:
                 pass
 
-        if not stopped:
-            messagebox.showwarning("Could Not Stop",
-                "Could not terminate the server automatically.\n\n"
-                "Please close the server console window manually,\n"
-                "then try again.")
-            return
+            exited = False
+            if sent:
+                start = time.time()
+                last_msg = None
+                while True:
+                    try:
+                        proc.wait(timeout=1)
+                        exited = True
+                    except psutil.TimeoutExpired:
+                        pass
+                    except psutil.NoSuchProcess:
+                        exited = True
+                    read_log()
+                    if exited:
+                        break
+                    elapsed = int(time.time() - start)
+                    if elapsed >= timeout:
+                        break
+                    if save_done:
+                        msg = "World saved, waiting for the server to close…"
+                    elif save_started:
+                        msg = "Saving the world…"
+                    else:
+                        msg = "Waiting for the server to save…"
+                    # Report phase changes, plus a heartbeat every 15 seconds
+                    if msg != last_msg or (elapsed and elapsed % 15 == 0):
+                        report(msg if msg != last_msg else f"{msg} ({elapsed}s)")
+                        last_msg = msg
+            else:
+                report("Couldn't send Ctrl+C to the server console.")
 
-        self.server_process = None
-        self._set_status("stopped")
+            if exited:
+                self.server_process = None
+                return "saved" if save_done else "exited"
+
+            if sent:
+                report(f"Server didn't close after {timeout}s — forcing it to stop…")
+            else:
+                report("Forcing the server to stop…")
+            if self._force_kill_server(proc):
+                self.server_process = None
+                return "killed"
+            return "failed"
+        finally:
+            self._stopping = False
+
+    def _force_kill_server(self, proc):
+        """Last resort: kill the server outright. V Rising doesn't save when it's killed."""
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=10,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=5)
+            return True
+        except psutil.NoSuchProcess:
+            return True
+        except psutil.TimeoutExpired:
+            pass
+
+        # taskkill didn't work — try psutil, then our own process handle
+        try:
+            for child in proc.children(recursive=True):
+                child.kill()
+            proc.kill()
+        except psutil.NoSuchProcess:
+            return True
+        except Exception:
+            if isinstance(self.server_process, subprocess.Popen) and self.server_process.pid == proc.pid:
+                try:
+                    self.server_process.kill()
+                except Exception:
+                    pass
+        try:
+            proc.wait(timeout=5)
+            return True
+        except psutil.NoSuchProcess:
+            return True
+        except Exception:
+            return False
 
     def _set_status(self, state):
         if state == "running":
@@ -4292,6 +4827,11 @@ class VRisingManager(tk.Tk):
             self.status_label.config(text="Server: Running", fg=self.GREEN)
             self.start_btn.config(state="disabled")
             self.stop_btn.config(state="normal")
+        elif state == "stopping":
+            self.status_dot.config(fg=self.YELLOW)
+            self.status_label.config(text="Server: Stopping…", fg=self.YELLOW)
+            self.start_btn.config(state="disabled")
+            self.stop_btn.config(state="disabled")
         elif state == "stopped":
             self.status_dot.config(fg="#555")
             self.status_label.config(text="Server: Stopped", fg=self.TEXT_DIM)
@@ -4334,6 +4874,11 @@ class VRisingManager(tk.Tk):
 
     def _monitor_loop(self):
         while self._running:
+            # A stop is in progress — let it own the status display until it finishes
+            if self._stopping:
+                time.sleep(1)
+                continue
+
             # If we don't have a process handle, check if one is already running
             if not self.server_process:
                 found = self._find_server_process()
@@ -4379,11 +4924,25 @@ class VRisingManager(tk.Tk):
 
     # ── Clean shutdown ───────────────────────────────────────────────────────
     def _on_close(self):
-        self._running = False
+        if self._stopping:
+            return   # wait for the stop (and save) to finish
         if self.server_process:
             if messagebox.askyesno("Server Running",
                                    "The server is still running.\nStop it before closing?"):
-                self._stop_server()
+                def after_stop(result):
+                    if result == "failed":
+                        messagebox.showwarning("Could Not Stop",
+                            "Could not stop the server automatically.\n"
+                            "It is still running — close its console window manually.")
+                    elif result == "killed":
+                        messagebox.showwarning("Server Force-Stopped",
+                            "The server didn't shut down on its own, so it was force-stopped.\n"
+                            "The world may not have saved.")
+                    self._running = False
+                    self.destroy()
+                self._stop_server(on_done=after_stop)
+                return
+        self._running = False
         self.destroy()
 
     def _switch_profile(self):
@@ -4415,6 +4974,10 @@ class VRisingManager(tk.Tk):
 
 
 if __name__ == "__main__":
+    # Helper mode used by graceful stop — no window, just send Ctrl+C and exit
+    if len(sys.argv) >= 3 and sys.argv[1] == "--send-ctrl-c":
+        raise SystemExit(_send_ctrl_c_to_console(int(sys.argv[2])))
+
     import traceback
     try:
         # ── Migrate any legacy single-file config into a Default profile ──

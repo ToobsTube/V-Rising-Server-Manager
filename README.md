@@ -2,7 +2,7 @@
 
 A lightweight GUI for managing your V Rising dedicated server on Windows.
 
-**Version 1.0.0** · By [ToobsTube]
+**Version 1.1.0** · By [ToobsTube]
 
 Also available as a standalone exe — no Python required.
 
@@ -64,6 +64,15 @@ On first launch the app opens to the **Setup tab** where you can point it at you
 ### Server Control
 Start and stop your server with a single button. The status bar shows live CPU and memory usage while the server is running.
 
+Stopping is graceful: the manager asks the server to shut down the same way pressing Ctrl+C in its console does, so V Rising saves the world first and players log back in where they left. The status bar shows the save in progress. Only if the server hasn't closed after 2 minutes is it force-stopped, and the manager warns you that the world may not have saved. Scheduled restarts, the daily restart and server updates all stop the server this way.
+
+### Connection Check
+On the **Network** tab. Shows your local IP and your public IP, with a button to copy each as `IP:Port` for Direct Connect. The public IP stays hidden unless you click **Show**, and **Copy** works without showing it, so it's safe to use while streaming.
+
+**Run Connection Check** tests that the server is answering (and shows its name, players and version), how quickly it answers through your public address, and whether Steam's server list has it. Each result explains what to do if something's wrong.
+
+> **Playing from the same house as the server?** Many home routers can't connect back to their own public address. Your server may then look high-latency, or be hidden by the server list's **Latency** filter, and Direct Connect to the public IP may fail. Loosen the Latency filter, or Direct Connect to the server PC's **local** IP with **LAN Server** ticked. Players outside your home aren't affected.
+
 ### Game Settings
 Edit the most commonly changed server settings — player limits, PvP toggle, day/night cycle length, XP and resource multipliers, castle decay, and more — without opening a config file. Changes take effect the next time the server starts.
 
@@ -124,6 +133,7 @@ Enter the same password and port in the manager's **Setup tab** under the RCON s
 
 | Version | Notes |
 |---------|-------|
+| 1.1.0 | Stopping the server now saves the world first (also for scheduled, daily and update restarts) · New Connection Check on the Network tab · The exe now keeps its settings in its own folder · Version shown in the window |
 | 1.0.0 | Initial release |
 
 ---
