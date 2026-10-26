@@ -143,7 +143,7 @@ DEFAULT_CONFIG = {
 }
 
 SERVER_EXE = "VRisingServer.exe"
-APP_VERSION = "1.1.0"   # keep in step with README.md and the GitHub release tag
+APP_VERSION = "1.1.1"   # keep in step with README.md and the GitHub release tag
 
 # How long a graceful stop waits for the server to save and exit before force-killing it
 GRACEFUL_STOP_TIMEOUT = 120
@@ -766,19 +766,23 @@ class VRisingManager(tk.Tk):
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        def _scroll_wheel(e):
-            canvas.yview_scroll(int(-1*(e.delta/120)), "units")
-
         def _scroll_up(e):
             canvas.yview_scroll(-1, "units")
 
         def _scroll_down(e):
             canvas.yview_scroll(1, "units")
 
-        # Bind mousewheel on both canvas and inner so scroll works without
-        # needing to click first — also propagate from any child widget
+        # The Windows mouse wheel is handled for every widget in _on_mousewheel,
+        # so it scrolls the tab wherever the pointer is
+        if not hasattr(self, "_scroll_canvases"):
+            self._scroll_canvases = set()
+            self.bind_all("<MouseWheel>", self._on_mousewheel)
+            # Wheel over a number box or dropdown scrolls the page instead of
+            # quietly changing the setting under the pointer
+            for cls in ("TSpinbox", "TCombobox", "Spinbox"):
+                self.bind_class(cls, "<MouseWheel>", lambda e: None)
+        self._scroll_canvases.add(canvas)
         for widget in (canvas, inner):
-            widget.bind("<MouseWheel>", _scroll_wheel)   # Windows
             widget.bind("<Button-4>",   _scroll_up)      # Linux scroll up
             widget.bind("<Button-5>",   _scroll_down)    # Linux scroll down
 
@@ -797,6 +801,19 @@ class VRisingManager(tk.Tk):
         outer.bind("<Visibility>", lambda e: canvas.focus_set())
         self.notebook.add(outer, text=label)
         return inner
+
+    def _on_mousewheel(self, e):
+        """Scroll the tab under the mouse, whichever widget the pointer is over.
+        Text boxes and lists keep their own scrolling."""
+        w = e.widget
+        if isinstance(w, str) or isinstance(w, (tk.Text, tk.Listbox)):
+            return   # str: Tk's own pop-up widgets, e.g. an open dropdown list
+        steps = max(1, abs(e.delta) // 120)   # touchpads send smaller deltas than 120
+        while w is not None:
+            if w in self._scroll_canvases:
+                w.yview_scroll(-steps if e.delta > 0 else steps, "units")
+                return
+            w = w.master
 
     # ── Helper: slider row ───────────────────────────────────────────────────
     def _slider_row(self, parent, row, label, var, from_, to, resolution=0.01,
