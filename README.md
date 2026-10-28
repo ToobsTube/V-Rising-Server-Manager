@@ -2,7 +2,7 @@
 
 A lightweight GUI for managing your V Rising dedicated server on Windows.
 
-**Version 1.1.0** · By [ToobsTube]
+**Version 1.1.1** · By [ToobsTube]
 
 Also available as a standalone exe — no Python required.
 
@@ -96,6 +96,7 @@ Five built-in color themes: Dark Blue (default), Dark Green, Dark Red, Midnight 
 
 - In-game announcements require RCON to be enabled in your server settings.
 - Game setting changes are saved immediately but only take effect on the next server start.
+- Server settings, the admin list and the ban list are kept in `<server folder>\save-data\Settings`, which game updates never touch. If yours are still in the game's default `VRisingServer_Data\StreamingAssets\Settings` folder, which updates do replace, the manager copies them over the first time it saves, keeping anything you set by hand.
 - When you close the manager while the server is running, you'll be asked whether to shut the server down or leave it running. The server itself does not depend on the manager to stay open.
 - The backup feature copies whatever the server has most recently saved to disk.
 
@@ -133,6 +134,7 @@ Enter the same password and port in the manager's **Setup tab** under the RCON s
 
 | Version | Notes |
 |---------|-------|
+| 1.1.1 | The mouse wheel scrolls a tab wherever the pointer is, not just over empty background · Scrolling over a number box or dropdown no longer changes its value · Server settings, admin list and ban list are kept in `save-data\Settings` (moved there automatically), so game updates can't reset them |
 | 1.1.0 | Stopping the server now saves the world first (also for scheduled, daily and update restarts) · New Connection Check on the Network tab · The exe now keeps its settings in its own folder · Version shown in the window |
 | 1.0.0 | Initial release |
 

@@ -143,7 +143,7 @@ DEFAULT_CONFIG = {
 }
 
 SERVER_EXE = "VRisingServer.exe"
-APP_VERSION = "1.1.0"   # keep in step with README.md and the GitHub release tag
+APP_VERSION = "1.1.1"   # keep in step with README.md and the GitHub release tag
 
 # How long a graceful stop waits for the server to save and exit before force-killing it
 GRACEFUL_STOP_TIMEOUT = 120
@@ -766,19 +766,23 @@ class VRisingManager(tk.Tk):
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        def _scroll_wheel(e):
-            canvas.yview_scroll(int(-1*(e.delta/120)), "units")
-
         def _scroll_up(e):
             canvas.yview_scroll(-1, "units")
 
         def _scroll_down(e):
             canvas.yview_scroll(1, "units")
 
-        # Bind mousewheel on both canvas and inner so scroll works without
-        # needing to click first — also propagate from any child widget
+        # The Windows mouse wheel is handled for every widget in _on_mousewheel,
+        # so it scrolls the tab wherever the pointer is
+        if not hasattr(self, "_scroll_canvases"):
+            self._scroll_canvases = set()
+            self.bind_all("<MouseWheel>", self._on_mousewheel)
+            # Wheel over a number box or dropdown scrolls the page instead of
+            # quietly changing the setting under the pointer
+            for cls in ("TSpinbox", "TCombobox", "Spinbox"):
+                self.bind_class(cls, "<MouseWheel>", lambda e: None)
+        self._scroll_canvases.add(canvas)
         for widget in (canvas, inner):
-            widget.bind("<MouseWheel>", _scroll_wheel)   # Windows
             widget.bind("<Button-4>",   _scroll_up)      # Linux scroll up
             widget.bind("<Button-5>",   _scroll_down)    # Linux scroll down
 
@@ -797,6 +801,19 @@ class VRisingManager(tk.Tk):
         outer.bind("<Visibility>", lambda e: canvas.focus_set())
         self.notebook.add(outer, text=label)
         return inner
+
+    def _on_mousewheel(self, e):
+        """Scroll the tab under the mouse, whichever widget the pointer is over.
+        Text boxes and lists keep their own scrolling."""
+        w = e.widget
+        if isinstance(w, str) or isinstance(w, (tk.Text, tk.Listbox)):
+            return   # str: Tk's own pop-up widgets, e.g. an open dropdown list
+        steps = max(1, abs(e.delta) // 120)   # touchpads send smaller deltas than 120
+        while w is not None:
+            if w in self._scroll_canvases:
+                w.yview_scroll(-steps if e.delta > 0 else steps, "units")
+                return
+            w = w.master
 
     # ── Helper: slider row ───────────────────────────────────────────────────
     def _slider_row(self, parent, row, label, var, from_, to, resolution=0.01,
@@ -2751,32 +2768,13 @@ class VRisingManager(tk.Tk):
     # ── Admin list file management ───────────────────────────────────────────
     def _get_adminlist_path(self):
         """
-        Find the correct adminlist.txt location.
-        V Rising checks several locations — we write to whichever already exists,
-        or fall back to save-data/Settings which is the recommended persistent location.
+        adminlist.txt in save-data/Settings, the persistent location that survives
+        server updates. An existing list in an older location is copied there first.
         """
         base = self.cfg.get("server_path", "").strip()
         if not base:
             return None
-        base = os.path.normpath(base)
-
-        candidates = [
-            # Persistent data path — recommended, survives server updates
-            os.path.join(base, "save-data", "Settings", "adminlist.txt"),
-            # AppData location
-            os.path.expandvars(
-                r"%USERPROFILE%\AppData\LocalLow\Stunlock Studios\VRisingServer\Settings\adminlist.txt"),
-            # StreamingAssets — default template location, overwritten by updates
-            os.path.join(base, "VRisingServer_Data", "StreamingAssets", "Settings", "adminlist.txt"),
-        ]
-
-        # Return the first one that already exists
-        for path in candidates:
-            if os.path.isfile(path):
-                return path
-
-        # None exist yet — return the preferred persistent location
-        return candidates[0]
+        return os.path.join(self._ensure_persistent_settings(base), "adminlist.txt")
 
     def _load_adminlist(self):
         path = self._get_adminlist_path()
@@ -4251,6 +4249,30 @@ class VRisingManager(tk.Tk):
                 pass
         return {}
 
+    def _ensure_persistent_settings(self, base):
+        """Make sure the server's settings files are in save-data\\Settings and return
+        that folder. We start the server with -persistentDataPath save-data, so it reads
+        its settings there, and game updates never touch it. Updates DO replace
+        StreamingAssets\\Settings, so any file that's only there (or in AppData) is
+        copied over first, keeping anything that was set by hand."""
+        settings_dir = os.path.join(os.path.normpath(base), "save-data", "Settings")
+        if not os.path.isdir(base):
+            return settings_dir
+        os.makedirs(settings_dir, exist_ok=True)
+        older_dirs = [d for d in self._find_settings_dirs()
+                      if os.path.normcase(d) != os.path.normcase(settings_dir)]
+        for name in ("ServerHostSettings.json", "ServerGameSettings.json",
+                     "adminlist.txt", "banlist.txt"):
+            dest = os.path.join(settings_dir, name)
+            if os.path.isfile(dest):
+                continue
+            for d in older_dirs:
+                src = os.path.join(d, name)
+                if os.path.isfile(src):
+                    shutil.copy2(src, dest)
+                    break
+        return settings_dir
+
     # ── Write ServerGameSettings.json / ServerHostSettings.json ─────────────
     def _write_server_settings(self):
         """
@@ -4262,17 +4284,8 @@ class VRisingManager(tk.Tk):
         if not base:
             return
 
-        # Write to whichever Settings folder already has the files,
-        # falling back to save-data\Settings if none exist yet.
-        settings_dir = None
-        for d in self._find_settings_dirs():
-            if os.path.isfile(os.path.join(d, "ServerHostSettings.json")) or \
-               os.path.isfile(os.path.join(d, "ServerGameSettings.json")):
-                settings_dir = d
-                break
-        if not settings_dir:
-            settings_dir = os.path.join(base, "save-data", "Settings")
-        os.makedirs(settings_dir, exist_ok=True)
+        # Always save-data\Settings, where game updates can't reset them
+        settings_dir = self._ensure_persistent_settings(base)
 
         # ── ServerGameSettings.json ──────────────────────────────────────────
         game_path = os.path.join(settings_dir, "ServerGameSettings.json")
