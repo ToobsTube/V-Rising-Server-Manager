@@ -144,7 +144,7 @@ DEFAULT_CONFIG = {
 }
 
 SERVER_EXE = "VRisingServer.exe"
-APP_VERSION = "1.1.2"   # keep in step with README.md and the GitHub release tag
+APP_VERSION = "1.1.3"   # keep in step with README.md and the GitHub release tag
 
 # Before 1.1.2 the preset dropdown offered these names, which aren't real V Rising presets
 # (the real ones are files in StreamingAssets/GameSettingPresets), so treat them as blank
@@ -4899,7 +4899,9 @@ class VRisingManager(tk.Tk):
         If this profile has an install path, only match a process whose
         executable is under that directory — so two servers on the same
         machine don't get confused with each other."""
-        install_dir = self.cfg.get("server_path", "").strip().lower().rstrip("\\/")
+        install_dir = self.cfg.get("server_path", "").strip()
+        if install_dir:
+            install_dir = os.path.normcase(os.path.normpath(install_dir))
 
         for proc in psutil.process_iter(["pid", "name", "exe"]):
             try:
@@ -4907,8 +4909,10 @@ class VRisingManager(tk.Tk):
                 exe  = (proc.info["exe"]  or "").lower()
                 if "vrisingserver" not in name and "vrisingserver" not in exe:
                     continue
-                # If install_dir is set, require the exe to be under it
-                if install_dir and exe and not exe.startswith(install_dir):
+                # If install_dir is set, require the exe to be in that exact folder. A plain
+                # prefix check would let C:\...\VRisingServer claim C:\...\VRisingServer-Test.
+                if install_dir and exe and \
+                        os.path.normcase(os.path.dirname(os.path.normpath(exe))) != install_dir:
                     continue
                 return proc
             except psutil.AccessDenied:
