@@ -2,7 +2,7 @@
 
 A lightweight GUI for managing your V Rising dedicated server on Windows.
 
-**Version 1.1.1** · By [ToobsTube]
+**Version 1.1.2** · By [ToobsTube]
 
 Also available as a standalone exe — no Python required.
 
@@ -134,6 +134,7 @@ Enter the same password and port in the manager's **Setup tab** under the RCON s
 
 | Version | Notes |
 |---------|-------|
+| 1.1.2 | Preset dropdowns list the game's real presets, read from your server (Game Settings Preset and a new Difficulty Preset), and default to blank · The old made-up preset names are cleared automatically · The All Waypoints Unlocked tooltip explains that waypoints only show on the map once their area is explored |
 | 1.1.1 | The mouse wheel scrolls a tab wherever the pointer is, not just over empty background · Scrolling over a number box or dropdown no longer changes its value · Server settings, admin list and ban list are kept in `save-data\Settings` (moved there automatically), so game updates can't reset them |
 | 1.1.0 | Stopping the server now saves the world first (also for scheduled, daily and update restarts) · New Connection Check on the Network tab · The exe now keeps its settings in its own folder · Version shown in the window |
 | 1.0.0 | Initial release |
