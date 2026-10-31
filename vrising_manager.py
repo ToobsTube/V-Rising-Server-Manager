@@ -2267,7 +2267,8 @@ class VRisingManager(tk.Tk):
                                            command=self._copy_local_ip, **btn_style)
         self.local_ip_copy_btn.pack(side="left")
         self._bind_tooltip(self.local_ip_copy_btn,
-            "For players in your home: Direct Connect to this address and tick 'LAN Server'.")
+            "For players in your home: Direct Connect to this address.\n"
+            "Leave 'LAN Server' unticked unless the server runs in LAN mode.")
 
         chk = tk.Frame(tab, bg=self.PANEL_BG)
         chk.grid(row=row+4, column=0, columnspan=4, sticky="w", padx=10, pady=(8, 4))
@@ -2404,7 +2405,7 @@ class VRisingManager(tk.Tk):
                     "No reply through your public address from this PC. That's common — many home "
                     "routers can't connect back to themselves — and it doesn't affect players outside "
                     "your home. Players in your home: loosen the Latency filter in the server list, or "
-                    "Direct Connect to the Local IP above with 'LAN Server' ticked."))
+                    "Direct Connect to the Local IP above, with 'LAN Server' unticked."))
 
             # 3. Does Steam's server list have it?
             try:
