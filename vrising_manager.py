@@ -144,7 +144,7 @@ DEFAULT_CONFIG = {
 }
 
 SERVER_EXE = "VRisingServer.exe"
-APP_VERSION = "1.1.2"   # keep in step with README.md and the GitHub release tag
+APP_VERSION = "1.1.3"   # keep in step with README.md and the GitHub release tag
 
 # Before 1.1.2 the preset dropdown offered these names, which aren't real V Rising presets
 # (the real ones are files in StreamingAssets/GameSettingPresets), so treat them as blank
@@ -1350,31 +1350,54 @@ class VRisingManager(tk.Tk):
             "+quit"
         ]
 
+        def written_mb(pid):
+            # SteamCMD reserves the full download size on disk up front, so the folder size
+            # says nothing about progress; how much it has written does
+            try:
+                p = psutil.Process(pid)
+                total = 0
+                for q in [p] + p.children(recursive=True):
+                    try:
+                        total += q.io_counters().write_bytes
+                    except (psutil.Error, AttributeError):
+                        pass
+                return total // (1024 * 1024)
+            except psutil.Error:
+                return 0
+
         def run_steamcmd():
             """Run SteamCMD and return the exit code, streaming output to the log."""
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,  # if it ever drops to its Steam> prompt, it exits instead of waiting
                 text=True,
                 bufsize=1,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
-            # Stream output line by line; SteamCMD can be quiet for long stretches
-            # so we also show a periodic "still running" heartbeat
+            # When its output goes to a pipe, SteamCMD holds it back and prints it in bursts,
+            # often only when it exits, so the log can sit still for minutes during a download.
+            # Show how much is on disk so far instead, so it's clear it's still working.
             last_output = [time.time()]
-            def heartbeat():
-                if proc.poll() is None:
-                    elapsed = int(time.time() - last_output[0])
-                    if elapsed >= 15:
-                        self.after(0, lambda: self._setup_log(
-                            f"  (still running — {elapsed}s since last output, please wait...)\n"))
-                    self.after(5000, heartbeat)
-            self.after(5000, heartbeat)
-            for line in proc.stdout:
-                last_output[0] = time.time()
-                self.after(0, lambda l=line.rstrip(): self._setup_log(l + "\n"))
-            proc.wait()
+            def read_output():
+                for line in proc.stdout:
+                    last_output[0] = time.time()
+                    self.after(0, lambda l=line.rstrip(): self._setup_log(l + "\n"))
+            reader = threading.Thread(target=read_output, daemon=True)
+            reader.start()
+            while proc.poll() is None:
+                time.sleep(10)
+                if proc.poll() is not None:
+                    break
+                quiet = int(time.time() - last_output[0])
+                if quiet >= 15:
+                    got = written_mb(proc.pid)
+                    progress = f"{got:,} MB written so far" if got > 0 else "nothing written yet"
+                    self.after(0, lambda q=quiet, p=progress: self._setup_log(
+                        f"  (still working — {p}; SteamCMD shows its messages in bursts, "
+                        f"{q}s since the last one)\n"))
+            reader.join(timeout=5)
             return proc.returncode
 
         def do_install():
@@ -1399,8 +1422,9 @@ class VRisingManager(tk.Tk):
 
                 rc = run_steamcmd()
 
-                # Exit code 8 means SteamCMD updated itself — just run it again
-                if rc == 8:
+                # SteamCMD exits with 7 or 8 after updating itself (a fresh copy always does on
+                # its first run), sometimes before downloading anything, so just run it again
+                if rc in (7, 8):
                     self.after(0, lambda: self._setup_log(
                         "\n⟳ SteamCMD updated itself — restarting download automatically...\n\n"))
                     rc = run_steamcmd()
@@ -2243,7 +2267,8 @@ class VRisingManager(tk.Tk):
                                            command=self._copy_local_ip, **btn_style)
         self.local_ip_copy_btn.pack(side="left")
         self._bind_tooltip(self.local_ip_copy_btn,
-            "For players in your home: Direct Connect to this address and tick 'LAN Server'.")
+            "For players in your home: Direct Connect to this address.\n"
+            "Leave 'LAN Server' unticked unless the server runs in LAN mode.")
 
         chk = tk.Frame(tab, bg=self.PANEL_BG)
         chk.grid(row=row+4, column=0, columnspan=4, sticky="w", padx=10, pady=(8, 4))
@@ -2380,7 +2405,7 @@ class VRisingManager(tk.Tk):
                     "No reply through your public address from this PC. That's common — many home "
                     "routers can't connect back to themselves — and it doesn't affect players outside "
                     "your home. Players in your home: loosen the Latency filter in the server list, or "
-                    "Direct Connect to the Local IP above with 'LAN Server' ticked."))
+                    "Direct Connect to the Local IP above, with 'LAN Server' unticked."))
 
             # 3. Does Steam's server list have it?
             try:
@@ -4899,7 +4924,9 @@ class VRisingManager(tk.Tk):
         If this profile has an install path, only match a process whose
         executable is under that directory — so two servers on the same
         machine don't get confused with each other."""
-        install_dir = self.cfg.get("server_path", "").strip().lower().rstrip("\\/")
+        install_dir = self.cfg.get("server_path", "").strip()
+        if install_dir:
+            install_dir = os.path.normcase(os.path.normpath(install_dir))
 
         for proc in psutil.process_iter(["pid", "name", "exe"]):
             try:
@@ -4907,8 +4934,10 @@ class VRisingManager(tk.Tk):
                 exe  = (proc.info["exe"]  or "").lower()
                 if "vrisingserver" not in name and "vrisingserver" not in exe:
                     continue
-                # If install_dir is set, require the exe to be under it
-                if install_dir and exe and not exe.startswith(install_dir):
+                # If install_dir is set, require the exe to be in that exact folder. A plain
+                # prefix check would let C:\...\VRisingServer claim C:\...\VRisingServer-Test.
+                if install_dir and exe and \
+                        os.path.normcase(os.path.dirname(os.path.normpath(exe))) != install_dir:
                     continue
                 return proc
             except psutil.AccessDenied:

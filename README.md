@@ -2,7 +2,7 @@
 
 A lightweight GUI for managing your V Rising dedicated server on Windows.
 
-**Version 1.1.2** · By [ToobsTube]
+**Version 1.1.3** · By [ToobsTube]
 
 Also available as a standalone exe — no Python required.
 
@@ -71,7 +71,7 @@ On the **Network** tab. Shows your local IP and your public IP, with a button to
 
 **Run Connection Check** tests that the server is answering (and shows its name, players and version), how quickly it answers through your public address, and whether Steam's server list has it. Each result explains what to do if something's wrong.
 
-> **Playing from the same house as the server?** Many home routers can't connect back to their own public address. Your server may then look high-latency, or be hidden by the server list's **Latency** filter, and Direct Connect to the public IP may fail. Loosen the Latency filter, or Direct Connect to the server PC's **local** IP with **LAN Server** ticked. Players outside your home aren't affected.
+> **Playing from the same house as the server?** Many home routers can't connect back to their own public address. Your server may then look high-latency, or be hidden by the server list's **Latency** filter, and Direct Connect to the public IP may fail. Loosen the Latency filter, or Direct Connect to the server PC's **local** IP (use the Copy button next to it) with **LAN Server** left unticked. That box is only for servers running in LAN mode. Players outside your home aren't affected.
 
 ### Game Settings
 Edit the most commonly changed server settings — player limits, PvP toggle, day/night cycle length, XP and resource multipliers, castle decay, and more — without opening a config file. Changes take effect the next time the server starts.
@@ -134,6 +134,7 @@ Enter the same password and port in the manager's **Setup tab** under the RCON s
 
 | Version | Notes |
 |---------|-------|
+| 1.1.3 | The Direct Connect tips now say to leave **LAN Server** unticked (it's only for servers in LAN mode) · Installing or updating the server shows how much SteamCMD has written while its own messages are held back, instead of looking frozen · A fresh SteamCMD install now finishes in one click (it re-runs SteamCMD after it updates itself) · Two servers on one PC can no longer be mixed up when one folder name starts with the other (for example `VRisingServer` and `VRisingServer-Test`) |
 | 1.1.2 | Preset dropdowns list the game's real presets, read from your server (Game Settings Preset and a new Difficulty Preset), and default to blank · The old made-up preset names are cleared automatically · The All Waypoints Unlocked tooltip explains that waypoints only show on the map once their area is explored |
 | 1.1.1 | The mouse wheel scrolls a tab wherever the pointer is, not just over empty background · Scrolling over a number box or dropdown no longer changes its value · Server settings, admin list and ban list are kept in `save-data\Settings` (moved there automatically), so game updates can't reset them |
 | 1.1.0 | Stopping the server now saves the world first (also for scheduled, daily and update restarts) · New Connection Check on the Network tab · The exe now keeps its settings in its own folder · Version shown in the window |
