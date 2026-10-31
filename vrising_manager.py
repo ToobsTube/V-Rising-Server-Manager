@@ -1350,31 +1350,54 @@ class VRisingManager(tk.Tk):
             "+quit"
         ]
 
+        def written_mb(pid):
+            # SteamCMD reserves the full download size on disk up front, so the folder size
+            # says nothing about progress; how much it has written does
+            try:
+                p = psutil.Process(pid)
+                total = 0
+                for q in [p] + p.children(recursive=True):
+                    try:
+                        total += q.io_counters().write_bytes
+                    except (psutil.Error, AttributeError):
+                        pass
+                return total // (1024 * 1024)
+            except psutil.Error:
+                return 0
+
         def run_steamcmd():
             """Run SteamCMD and return the exit code, streaming output to the log."""
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,  # if it ever drops to its Steam> prompt, it exits instead of waiting
                 text=True,
                 bufsize=1,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
-            # Stream output line by line; SteamCMD can be quiet for long stretches
-            # so we also show a periodic "still running" heartbeat
+            # When its output goes to a pipe, SteamCMD holds it back and prints it in bursts,
+            # often only when it exits, so the log can sit still for minutes during a download.
+            # Show how much is on disk so far instead, so it's clear it's still working.
             last_output = [time.time()]
-            def heartbeat():
-                if proc.poll() is None:
-                    elapsed = int(time.time() - last_output[0])
-                    if elapsed >= 15:
-                        self.after(0, lambda: self._setup_log(
-                            f"  (still running — {elapsed}s since last output, please wait...)\n"))
-                    self.after(5000, heartbeat)
-            self.after(5000, heartbeat)
-            for line in proc.stdout:
-                last_output[0] = time.time()
-                self.after(0, lambda l=line.rstrip(): self._setup_log(l + "\n"))
-            proc.wait()
+            def read_output():
+                for line in proc.stdout:
+                    last_output[0] = time.time()
+                    self.after(0, lambda l=line.rstrip(): self._setup_log(l + "\n"))
+            reader = threading.Thread(target=read_output, daemon=True)
+            reader.start()
+            while proc.poll() is None:
+                time.sleep(10)
+                if proc.poll() is not None:
+                    break
+                quiet = int(time.time() - last_output[0])
+                if quiet >= 15:
+                    got = written_mb(proc.pid)
+                    progress = f"{got:,} MB written so far" if got > 0 else "nothing written yet"
+                    self.after(0, lambda q=quiet, p=progress: self._setup_log(
+                        f"  (still working — {p}; SteamCMD shows its messages in bursts, "
+                        f"{q}s since the last one)\n"))
+            reader.join(timeout=5)
             return proc.returncode
 
         def do_install():
@@ -1399,8 +1422,9 @@ class VRisingManager(tk.Tk):
 
                 rc = run_steamcmd()
 
-                # Exit code 8 means SteamCMD updated itself — just run it again
-                if rc == 8:
+                # SteamCMD exits with 7 or 8 after updating itself (a fresh copy always does on
+                # its first run), sometimes before downloading anything, so just run it again
+                if rc in (7, 8):
                     self.after(0, lambda: self._setup_log(
                         "\n⟳ SteamCMD updated itself — restarting download automatically...\n\n"))
                     rc = run_steamcmd()
