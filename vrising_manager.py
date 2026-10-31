@@ -49,7 +49,8 @@ DEFAULT_CONFIG = {
     "blood_moon_duration": 1.5,
     "castle_decay_rate": 1.0,
     "castle_blood_essence_drain": 1.0,
-    "global_settings_preset": "Standard",
+    "global_settings_preset": "",   # GameSettingsPreset; blank = use the settings on the tabs
+    "difficulty_preset": "",        # GameDifficultyPreset; blank = use the settings on the tabs
     "xp_multiplier": 1.0,
     "drop_table_modifier": 1.0,
     "resource_yield_modifier": 1.0,
@@ -143,7 +144,15 @@ DEFAULT_CONFIG = {
 }
 
 SERVER_EXE = "VRisingServer.exe"
-APP_VERSION = "1.1.1"   # keep in step with README.md and the GitHub release tag
+APP_VERSION = "1.1.2"   # keep in step with README.md and the GitHub release tag
+
+# Before 1.1.2 the preset dropdown offered these names, which aren't real V Rising presets
+# (the real ones are files in StreamingAssets/GameSettingPresets), so treat them as blank
+_OLD_FAKE_PRESETS = {"Standard", "Relaxed", "Difficult", "Brutal"}
+
+
+def _clean_preset(name):
+    return "" if not name or name in _OLD_FAKE_PRESETS else name
 
 # How long a graceful stop waits for the server to save and exit before force-killing it
 GRACEFUL_STOP_TIMEOUT = 120
@@ -1850,8 +1859,10 @@ class VRisingManager(tk.Tk):
 
         _chk_row(tab, 20, self.all_waypoints_var,
                  "All Waypoints Unlocked",
-                 "When enabled, all teleport waypoints are unlocked for everyone\n"
-                 "from the start without needing to discover them.\n\n"
+                 "When enabled, every waypoint is unlocked for everyone\n"
+                 "without having to find it first.\n"
+                 "A waypoint still only shows on the map once the area\n"
+                 "around it has been explored.\n\n"
                  "Default: disabled")
 
         ttk.Label(tab, text="Clan Size:", width=28, anchor="w").grid(
@@ -2114,21 +2125,46 @@ class VRisingManager(tk.Tk):
             "Plentiful = multiple can exist.\n\n"
             "Default: Unique")
 
-        self._section(tab, 58, "Preset")
-        ttk.Label(tab, text="Global Preset:").grid(row=60, column=0, sticky="w", padx=(10,4), pady=5)
-        self.preset_var = tk.StringVar()
-        preset_cb = ttk.Combobox(tab, textvariable=self.preset_var, width=20,
-                                 values=["", "Standard", "Relaxed", "Difficult", "Brutal"],
-                                 state="readonly")
-        preset_cb.grid(row=60, column=1, sticky="w", padx=4)
-        pr_tip = tk.Label(tab, text="ℹ", bg=self.PANEL_BG, fg=self.TEXT_DIM,
-                          font=("Segoe UI", 9), cursor="question_arrow")
-        pr_tip.grid(row=60, column=3, sticky="w", padx=(0,6))
-        self._bind_tooltip(pr_tip,
-            "Applies a server-side difficulty preset on next start.\n"
-            "⚠ The preset overrides many individual settings in ServerGameSettings.json.\n"
-            "Leave blank to use your custom settings instead.\n\n"
-            "Default: blank (use custom settings)")
+        self._section(tab, 58, "Presets")
+        self.preset_var            = tk.StringVar()
+        self.difficulty_preset_var = tk.StringVar()
+        # Choices come from the game's own preset folders, so only real presets for
+        # the installed game version are offered. Refreshed each time a list opens.
+        for row, label, var, folder, tip in (
+            (60, "Game Settings Preset:", self.preset_var, "GameSettingPresets",
+             "Loads one of the game's own setting presets, such as StandardPvE,\n"
+             "instead of the settings on these tabs.\n"
+             "Leave blank to use your settings.\n\n"
+             "Default: blank"),
+            (61, "Difficulty Preset:", self.difficulty_preset_var, "GameDifficultyPresets",
+             "Loads one of the game's own difficulty presets, such as\n"
+             "Difficulty_Normal. Leave blank to use your settings.\n\n"
+             "Default: blank"),
+        ):
+            ttk.Label(tab, text=label).grid(row=row, column=0, sticky="w", padx=(10,4), pady=5)
+            cb = ttk.Combobox(tab, textvariable=var, width=24, state="readonly")
+            cb.configure(values=self._preset_choices(folder),
+                         postcommand=lambda cb=cb, f=folder: cb.configure(values=self._preset_choices(f)))
+            cb.grid(row=row, column=1, sticky="w", padx=4)
+            pr_tip = tk.Label(tab, text="ℹ", bg=self.PANEL_BG, fg=self.TEXT_DIM,
+                              font=("Segoe UI", 9), cursor="question_arrow")
+            pr_tip.grid(row=row, column=3, sticky="w", padx=(0,6))
+            self._bind_tooltip(pr_tip, tip)
+
+    def _preset_choices(self, folder):
+        """Blank plus the presets in the server's StreamingAssets/<folder>."""
+        try:
+            base = self.path_var.get().strip()
+        except AttributeError:
+            base = ""
+        base = base or self.cfg.get("server_path", "")
+        path = os.path.join(base, "VRisingServer_Data", "StreamingAssets", folder)
+        try:
+            names = sorted(os.path.splitext(f)[0] for f in os.listdir(path)
+                           if f.lower().endswith(".json"))
+        except OSError:
+            names = []
+        return [""] + names
 
     # ── Tab: Network ────────────────────────────────────────────────────────
     def _build_tab_network(self):
@@ -3924,7 +3960,8 @@ class VRisingManager(tk.Tk):
                 if "ListOnSteam"        in host: self.list_steam_var.set(host["ListOnSteam"])
                 if "ListOnEOS"          in host: self.list_eos_var.set(host["ListOnEOS"])
                 if "Secure"             in host: self.secure_var.set(host["Secure"])
-                if "GameSettingsPreset" in host: self.preset_var.set(host["GameSettingsPreset"])
+                if "GameSettingsPreset" in host: self.preset_var.set(_clean_preset(host["GameSettingsPreset"]))
+                if "GameDifficultyPreset" in host: self.difficulty_preset_var.set(host["GameDifficultyPreset"] or "")
                 if "Rcon" in host:
                     rcon = host["Rcon"]
                     if "Enabled"  in rcon: self.rcon_enabled_var.set(rcon["Enabled"])
@@ -4125,7 +4162,8 @@ class VRisingManager(tk.Tk):
         self.relic_spawn_var.set(c.get("relic_spawn_type", "Unique"))
         self.servant_var.set(c["servant_convert_rate"])
         self.blood_start_var.set(c["starting_blood_essence"])
-        self.preset_var.set(c["global_settings_preset"])
+        self.preset_var.set(_clean_preset(c.get("global_settings_preset", "")))
+        self.difficulty_preset_var.set(c.get("difficulty_preset", ""))
         self.game_port_var.set(c["game_port"])
         self.query_port_var.set(c["query_port"])
         self.rcon_enabled_var.set(c.get("rcon_enabled", False))
@@ -4225,6 +4263,7 @@ class VRisingManager(tk.Tk):
         self.cfg["servant_convert_rate"]  = float(self.servant_var.get())
         self.cfg["starting_blood_essence"]= int(self.blood_start_var.get())
         self.cfg["global_settings_preset"]= self.preset_var.get()
+        self.cfg["difficulty_preset"]     = self.difficulty_preset_var.get()
         self.cfg["game_port"]             = int(self.game_port_var.get())
         self.cfg["query_port"]            = int(self.query_port_var.get())
         self.cfg["rcon_enabled"]          = bool(self.rcon_enabled_var.get())
@@ -4439,7 +4478,8 @@ class VRisingManager(tk.Tk):
             "AutoSaveCount":       self.cfg.get("auto_save_count", 20),
             "AutoSaveInterval":    self.cfg["auto_save_interval"],
             "CompressSaveFiles":   self.cfg.get("compress_saves", True),
-            "GameSettingsPreset":  self.cfg["global_settings_preset"],
+            "GameSettingsPreset":  _clean_preset(self.cfg.get("global_settings_preset", "")),
+            "GameDifficultyPreset": self.cfg.get("difficulty_preset", ""),
             "Rcon": {
                 "Enabled":  self.cfg.get("rcon_enabled", False),
                 "Password": self.cfg.get("rcon_password", ""),
@@ -4492,7 +4532,8 @@ class VRisingManager(tk.Tk):
             if "ListOnSteam"        in host: self.list_steam_var.set(host["ListOnSteam"])
             if "ListOnEOS"          in host: self.list_eos_var.set(host["ListOnEOS"])
             if "Secure"             in host: self.secure_var.set(host["Secure"])
-            if "GameSettingsPreset" in host: self.preset_var.set(host["GameSettingsPreset"])
+            if "GameSettingsPreset" in host: self.preset_var.set(_clean_preset(host["GameSettingsPreset"]))
+            if "GameDifficultyPreset" in host: self.difficulty_preset_var.set(host["GameDifficultyPreset"] or "")
             if "Rcon" in host:
                 rcon = host["Rcon"]
                 if "Enabled"  in rcon: self.rcon_enabled_var.set(rcon["Enabled"])
