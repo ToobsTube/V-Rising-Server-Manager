@@ -144,7 +144,7 @@ DEFAULT_CONFIG = {
 }
 
 SERVER_EXE = "VRisingServer.exe"
-APP_VERSION = "1.1.3"   # keep in step with README.md and the GitHub release tag
+APP_VERSION = "1.1.4"   # keep in step with README.md and the GitHub release tag
 
 # Before 1.1.2 the preset dropdown offered these names, which aren't real V Rising presets
 # (the real ones are files in StreamingAssets/GameSettingPresets), so treat them as blank
@@ -583,6 +583,7 @@ class VRisingManager(tk.Tk):
 
         self.cfg = load_config()
         self.server_process = None
+        self._stopped_by_user = False   # True after the server is stopped from the manager, until it's started again
         self.monitor_thread = None
         self._running = True
         self._restart_cancel = False
@@ -3454,8 +3455,10 @@ class VRisingManager(tk.Tk):
                         countdown = f"{hrs}h {mins}m"
                     else:
                         countdown = f"{mins}m {secs}s"
+                    last = getattr(self, "_daily_last_note", "")
                     self.after(0, lambda: self.daily_status.config(
-                        text=f"Daily restart at {tgt.hour:02d}:{tgt.minute:02d} — next in {countdown}",
+                        text=f"Daily restart at {tgt.hour:02d}:{tgt.minute:02d} — next in {countdown}"
+                             + (f"\nLast: {last}" if last else ""),
                         fg=self.GREEN))
                     self.after(10000, lambda: _update_status_until(tgt))
 
@@ -3471,6 +3474,14 @@ class VRisingManager(tk.Tk):
 
                 if getattr(self, "_daily_restart_cancel", False):
                     break
+
+                # Nothing to restart (and nobody to warn) if the server isn't running
+                if self._server_pid() is None:
+                    self._skip_daily_restart(target)
+                    while (not getattr(self, "_daily_restart_cancel", False)
+                           and datetime.datetime.now() < target + datetime.timedelta(seconds=90)):
+                        time.sleep(15)
+                    continue
 
                 # Warning phase
                 warned_at = set()
@@ -3505,12 +3516,9 @@ class VRisingManager(tk.Tk):
                 if getattr(self, "_daily_restart_cancel", False):
                     break
 
-                # Do the restart — only if server is actually running
-                if not self.server_process and not self._find_server_process():
-                    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-                    self._write_restart_log(f"SKIPPED at {ts} — server was not running at restart time")
-                    self.after(0, lambda: self.daily_status.config(
-                        text="Daily restart skipped — server was not running.", fg=self.YELLOW))
+                # Do the restart — only if the server is still running (it may have stopped during the warnings)
+                if self._server_pid() is None:
+                    self._skip_daily_restart(target)
                     time.sleep(90)
                     continue
 
@@ -3544,6 +3552,7 @@ class VRisingManager(tk.Tk):
                 }.get(result, result)
                 self._write_restart_log(
                     f"SUCCESS — daily restart completed at {restart_time} ({save_note})")
+                self._daily_last_note = f"restarted at {restart_time[-5:]} ({save_note})"
                 self.after(0, lambda rt=restart_time: self.daily_status.config(
                     text=f"Last daily restart completed at {rt}. Next at {h:02d}:{m:02d}.",
                     fg=self.GREEN))
@@ -3563,6 +3572,18 @@ class VRisingManager(tk.Tk):
                 self.after(0, lambda t=err_text: self.daily_error_lbl.config(text=t))
                 time.sleep(60)
                 continue
+
+    def _skip_daily_restart(self, target):
+        """Note a daily restart that was skipped because the server wasn't running."""
+        ts = target.strftime("%Y-%m-%d %H:%M")
+        if self._stopped_by_user:
+            why = "the server was stopped from the manager"
+        else:
+            why = "the server wasn't running (it may have crashed or been closed outside the manager)"
+        self._write_restart_log(f"SKIPPED at {ts} — {why}")
+        self._daily_last_note = f"skipped at {ts[-5:]}, {why}"
+        self.after(0, lambda: self.daily_status.config(
+            text=f"Daily restart at {ts[-5:]} skipped — {why}.", fg=self.YELLOW))
 
     def _send_rcon_silent(self, command):
         """Send an RCON command silently — used by automated restarts. Logs failures to daily status."""
@@ -4681,6 +4702,7 @@ class VRisingManager(tk.Tk):
         exe = self._get_exe_path()
         if not exe:
             return
+        self._stopped_by_user = False
         self._collect_config_from_ui()
         save_config(self.cfg)
         self._write_server_settings()
@@ -4728,6 +4750,7 @@ class VRisingManager(tk.Tk):
                 self._set_status("running")
             else:
                 self.server_process = None
+                self._stopped_by_user = True
                 self._set_status("stopped")
             if on_done:
                 on_done(result)
