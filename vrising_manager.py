@@ -154,6 +154,29 @@ _OLD_FAKE_PRESETS = {"Standard", "Relaxed", "Difficult", "Brutal"}
 def _clean_preset(name):
     return "" if not name or name in _OLD_FAKE_PRESETS else name
 
+# Automatic restart: every day, or one day a week (index 1-7 = Monday-Sunday, like datetime.weekday() + 1)
+RESTART_DAYS = ["Every day", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def _clean_restart_day(day):
+    return day if day in RESTART_DAYS else RESTART_DAYS[0]
+
+
+def _restart_when(day, h, m):
+    """'every day at 03:00' or 'every Sunday at 03:00'."""
+    day = _clean_restart_day(day)
+    return f"{day.lower() if day == RESTART_DAYS[0] else 'every ' + day} at {h:02d}:{m:02d}"
+
+
+def _next_restart(now, day, h, m):
+    """The next time after `now` that an automatic restart set for `day` at h:m should happen."""
+    target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    day = _clean_restart_day(day)
+    if day == RESTART_DAYS[0]:
+        return target if target > now else target + timedelta(days=1)
+    target += timedelta(days=(RESTART_DAYS.index(day) - 1 - now.weekday()) % 7)
+    return target if target > now else target + timedelta(days=7)
+
 # How long a graceful stop waits for the server to save and exit before force-killing it
 GRACEFUL_STOP_TIMEOUT = 120
 SAVE_START_LINE = "Saving the world on exit"
@@ -3055,12 +3078,17 @@ class VRisingManager(tk.Tk):
         self.after(100, self._update_sched_idle_text)
 
         # ── Daily Automatic Restart ──────────────────────────────────────────
-        self._section_plain(outer, 9, "Daily Automatic Restart")
+        self._section_plain(outer, 9, "Automatic Restart")
 
         daily_frame = tk.Frame(outer, bg=self.PANEL_BG)
         daily_frame.grid(row=10, column=0, sticky="ew", padx=10, pady=(2,4))
 
-        tk.Label(daily_frame, text="Restart time:", bg=self.PANEL_BG,
+        tk.Label(daily_frame, text="Restart:", bg=self.PANEL_BG,
+                 fg=self.TEXT, font=("Segoe UI", 9)).pack(side="left", padx=(0,6))
+        self.daily_day_var = tk.StringVar(value=_clean_restart_day(self.cfg.get("daily_restart_day")))
+        ttk.Combobox(daily_frame, textvariable=self.daily_day_var, values=RESTART_DAYS,
+                     state="readonly", width=10).pack(side="left", padx=(0,6))
+        tk.Label(daily_frame, text="at", bg=self.PANEL_BG,
                  fg=self.TEXT, font=("Segoe UI", 9)).pack(side="left", padx=(0,6))
 
         self.daily_hour_var = tk.IntVar(value=self.cfg.get("daily_restart_hour", 3))
@@ -3090,18 +3118,18 @@ class VRisingManager(tk.Tk):
             self._bind_tooltip(w,
                 "Skip the daily restart if the server was started less than this many hours\n"
                 "before it, for example after you restarted it yourself in the evening.\n"
-                "It restarts the next night instead. 0 = always restart.\n\n"
+                "It restarts at the next scheduled time instead. 0 = always restart.\n\n"
                 "Default: 10")
 
         self.daily_enabled_var = tk.BooleanVar(value=self.cfg.get("daily_restart_enabled", False))
-        self.daily_toggle_btn = tk.Button(daily_frame, text="Enable Daily Restart",
+        self.daily_toggle_btn = tk.Button(daily_frame, text="Enable Auto Restart",
                                            command=self._toggle_daily_restart,
                                            bg=self.GREEN, fg="#0d1b2a", relief="flat",
                                            font=("Segoe UI", 9, "bold"), padx=10, pady=3,
                                            cursor="hand2")
         self.daily_toggle_btn.pack(side="left")
 
-        self.daily_status = tk.Label(outer, text="Daily restart is disabled.",
+        self.daily_status = tk.Label(outer, text="Automatic restart is disabled.",
                                       bg=self.PANEL_BG, fg=self.TEXT_DIM,
                                       font=("Segoe UI", 8))
         self.daily_status.grid(row=11, column=0, sticky="w", padx=14, pady=(0,2))
@@ -3370,11 +3398,13 @@ class VRisingManager(tk.Tk):
             if self.daily_enabled_var.get():
                 h = self.daily_hour_var.get()
                 m = self.daily_minute_var.get()
+                day = _clean_restart_day(self.daily_day_var.get())
                 self.sched_status.config(
-                    text=f"No one-time restart scheduled.  (Daily auto-restart at {h:02d}:{m:02d} is active)",
+                    text=f"No one-time restart scheduled.  (Automatic restart {_restart_when(day, h, m)} is active)",
                     fg=self.TEXT_DIM)
+                short = f"{h:02d}:{m:02d}" if day == RESTART_DAYS[0] else f"{day[:3]} {h:02d}:{m:02d}"
                 self.daily_restart_status_lbl.config(
-                    text=f"⏰ Daily restart {h:02d}:{m:02d}", fg=self.TEXT)
+                    text=f"⏰ Restart {short}", fg=self.TEXT)
             else:
                 self.sched_status.config(text="No restart scheduled.", fg=self.TEXT_DIM)
                 self.daily_restart_status_lbl.config(text="")
@@ -3408,9 +3438,10 @@ class VRisingManager(tk.Tk):
         if self.daily_enabled_var.get():
             self.daily_enabled_var.set(False)
             self._daily_restart_cancel = True
-            self.daily_toggle_btn.config(text="Enable Daily Restart", bg=self.GREEN, fg="#0d1b2a")
-            self.daily_status.config(text="Daily restart is disabled.", fg=self.TEXT_DIM)
+            self.daily_toggle_btn.config(text="Enable Auto Restart", bg=self.GREEN, fg="#0d1b2a")
+            self.daily_status.config(text="Automatic restart is disabled.", fg=self.TEXT_DIM)
             self.cfg["daily_restart_enabled"] = False
+            self.cfg["daily_restart_day"]     = _clean_restart_day(self.daily_day_var.get())
             self.cfg["daily_restart_hour"]    = self.daily_hour_var.get()
             self.cfg["daily_restart_minute"]  = self.daily_minute_var.get()
             self.cfg["daily_restart_warn"]    = self.daily_warn_var.get()
@@ -3423,28 +3454,39 @@ class VRisingManager(tk.Tk):
     def _start_daily_restart_loop(self):
         self.daily_enabled_var.set(True)
         self._daily_restart_cancel = False
+        # Each start gets a new number and any older loop stops when it sees a newer one, so turning
+        # the restart off and on again quickly (before the old loop noticed) can't leave two running
+        self._daily_loop_gen = getattr(self, "_daily_loop_gen", 0) + 1
         h = self.daily_hour_var.get()
         m = self.daily_minute_var.get()
-        self.daily_toggle_btn.config(text="Disable Daily Restart", bg=self.ACCENT, fg="white")
+        day = _clean_restart_day(self.daily_day_var.get())
+        self.daily_toggle_btn.config(text="Disable Auto Restart", bg=self.ACCENT, fg="white")
         self.daily_status.config(
-            text=f"Daily restart enabled — will restart at {h:02d}:{m:02d} every night.",
+            text=f"Automatic restart enabled — will restart {_restart_when(day, h, m)}.",
             fg=self.GREEN)
         self.cfg["daily_restart_enabled"] = True
+        self.cfg["daily_restart_day"]     = day
         self.cfg["daily_restart_hour"]    = h
         self.cfg["daily_restart_minute"]  = m
         self.cfg["daily_restart_warn"]    = self.daily_warn_var.get()
         self.cfg["daily_restart_min_uptime"] = self.daily_min_uptime_var.get()
         save_config(self.cfg)
-        t = threading.Thread(target=self._daily_restart_loop, daemon=True)
+        t = threading.Thread(target=self._daily_restart_loop, args=(self._daily_loop_gen,), daemon=True)
         t.start()
 
-    def _daily_restart_loop(self):
-        """Background thread: waits until scheduled time, warns, restarts. Loops nightly."""
+    def _daily_restart_loop(self, gen=None):
+        """Background thread: waits until scheduled time, warns, restarts. Loops daily or weekly."""
         import datetime
-        while not getattr(self, "_daily_restart_cancel", False):
+
+        def cancelled():
+            return (getattr(self, "_daily_restart_cancel", False)
+                    or (gen is not None and gen != getattr(self, "_daily_loop_gen", gen)))
+
+        while not cancelled():
             try:
                 h = self.cfg.get("daily_restart_hour", 3)
                 m = self.cfg.get("daily_restart_minute", 0)
+                day = _clean_restart_day(self.cfg.get("daily_restart_day"))
                 warn_minutes = self.cfg.get("daily_restart_warn", 10)
             except Exception as e:
                 self.after(0, lambda err=e: self.daily_status.config(
@@ -3453,13 +3495,10 @@ class VRisingManager(tk.Tk):
                 continue
 
             try:
-                now = datetime.datetime.now()
-                target = now.replace(hour=h, minute=m, second=0, microsecond=0)
-                if target <= now:
-                    target += datetime.timedelta(days=1)
+                target = _next_restart(datetime.datetime.now(), day, h, m)
 
                 def _update_status_until(tgt):
-                    if getattr(self, "_daily_restart_cancel", False):
+                    if cancelled():
                         return
                     remaining = tgt - datetime.datetime.now()
                     total_secs = int(remaining.total_seconds())
@@ -3467,13 +3506,15 @@ class VRisingManager(tk.Tk):
                         return
                     hrs, rem = divmod(total_secs, 3600)
                     mins, secs = divmod(rem, 60)
-                    if hrs > 0:
+                    if hrs >= 24:
+                        countdown = f"{hrs // 24}d {hrs % 24}h"
+                    elif hrs > 0:
                         countdown = f"{hrs}h {mins}m"
                     else:
                         countdown = f"{mins}m {secs}s"
                     last = getattr(self, "_daily_last_note", "")
                     self.after(0, lambda: self.daily_status.config(
-                        text=f"Daily restart at {tgt.hour:02d}:{tgt.minute:02d} — next in {countdown}"
+                        text=f"Restart {_restart_when(day, h, m)} — next in {countdown}"
                              + (f"\nLast: {last}" if last else ""),
                         fg=self.GREEN))
                     self.after(10000, lambda: _update_status_until(tgt))
@@ -3482,13 +3523,13 @@ class VRisingManager(tk.Tk):
 
                 # Sleep until warn_minutes before restart
                 warn_start = target - datetime.timedelta(minutes=warn_minutes)
-                while not getattr(self, "_daily_restart_cancel", False):
+                while not cancelled():
                     remaining = (warn_start - datetime.datetime.now()).total_seconds()
                     if remaining <= 0:
                         break
                     time.sleep(min(30, max(1, remaining)))
 
-                if getattr(self, "_daily_restart_cancel", False):
+                if cancelled():
                     break
 
                 # Nothing to restart (and nobody to warn) if the server isn't running,
@@ -3497,7 +3538,7 @@ class VRisingManager(tk.Tk):
                 young = None if pid is None else self._recently_started(pid)
                 if pid is None or young:
                     self._skip_daily_restart(target, young)
-                    while (not getattr(self, "_daily_restart_cancel", False)
+                    while (not cancelled()
                            and datetime.datetime.now() < target + datetime.timedelta(seconds=90)):
                         time.sleep(15)
                     continue
@@ -3520,7 +3561,7 @@ class VRisingManager(tk.Tk):
                         self._send_rcon_silent(f"announce {msg}")
                         break  # only send the most relevant one immediately
 
-                while not getattr(self, "_daily_restart_cancel", False):
+                while not cancelled():
                     remaining_secs = (target - datetime.datetime.now()).total_seconds()
                     remaining_mins = remaining_secs / 60.0
                     for wm in warning_minutes:
@@ -3532,7 +3573,7 @@ class VRisingManager(tk.Tk):
                         break
                     time.sleep(5)
 
-                if getattr(self, "_daily_restart_cancel", False):
+                if cancelled():
                     break
 
                 # Do the restart — only if the server is still running (it may have stopped during the warnings)
@@ -3573,7 +3614,7 @@ class VRisingManager(tk.Tk):
                     f"SUCCESS — daily restart completed at {restart_time} ({save_note})")
                 self._daily_last_note = f"restarted at {restart_time[-5:]} ({save_note})"
                 self.after(0, lambda rt=restart_time: self.daily_status.config(
-                    text=f"Last daily restart completed at {rt}. Next at {h:02d}:{m:02d}.",
+                    text=f"Last restart completed at {rt}. Next {_restart_when(day, h, m)}.",
                     fg=self.GREEN))
 
                 # Sleep past the restart time before looping to avoid double-trigger
@@ -3624,7 +3665,7 @@ class VRisingManager(tk.Tk):
         self._write_restart_log(f"SKIPPED at {ts} — {why}")
         self._daily_last_note = f"skipped at {ts[-5:]}, {why}"
         self.after(0, lambda: self.daily_status.config(
-            text=f"Daily restart at {ts[-5:]} skipped — {why}.", fg=self.YELLOW))
+            text=f"Restart at {ts[-5:]} skipped — {why}.", fg=self.YELLOW))
 
     def _send_rcon_silent(self, command):
         """Send an RCON command silently — used by automated restarts. Logs failures to daily status."""

@@ -81,8 +81,8 @@ Schedule a server restart or maintenance shutdown with automatic in-game announc
 
 The **Restart after shutdown** checkbox controls what happens when the countdown finishes. Leave it checked for a normal restart. Uncheck it when you need time to install mods, update server files, or perform maintenance before bringing the server back up — the server shuts down and waits for you to start it again manually.
 
-### Daily Auto-Restart
-Set a time for the server to restart automatically every day. Can be enabled or disabled at any time. If the server is already stopped at that time, the restart is skipped without sending warnings, and the tab notes whether it was stopped from the manager or may have crashed. **Skip if up < (h)** (default 10) also skips it when the server was started less than that many hours before, for example after you restarted it yourself in the evening; set it to 0 to always restart.
+### Automatic Restart
+Set a time for the server to restart automatically, **every day** or once a week on the day you pick. Can be enabled or disabled at any time. If the server is already stopped at that time, the restart is skipped without sending warnings, and the tab notes whether it was stopped from the manager or may have crashed. **Skip if up < (h)** (default 10) also skips it when the server was started less than that many hours before, for example after you restarted it yourself in the evening; set it to 0 to always restart.
 
 ### Automated Backups
 Back up your world save on demand or on a schedule. Supports any local drive, network drive, or cloud-synced folder (OneDrive, Google Drive, Dropbox, etc.). Configure how often backups run and how many to keep.
@@ -134,7 +134,7 @@ Enter the same password and port in the manager's **Setup tab** under the RCON s
 
 | Version | Notes |
 |---------|-------|
-| 1.1.4 | The daily restart no longer sends warnings or shows RCON errors when the server is already stopped; it skips quietly and says why (stopped from the manager, or possibly crashed) · New **Skip if up < (h)** setting (default 10): the daily restart is skipped when the server was started only a few hours before it · The Daily Restart tab keeps showing how the last restart went |
+| 1.1.4 | The automatic restart can run every day or once a week on a chosen day · Turning it off and on again quickly can no longer leave two restart timers running (which restarted the server twice) · The daily restart no longer sends warnings or shows RCON errors when the server is already stopped; it skips quietly and says why (stopped from the manager, or possibly crashed) · New **Skip if up < (h)** setting (default 10): the daily restart is skipped when the server was started only a few hours before it · The Daily Restart tab keeps showing how the last restart went |
 | 1.1.3 | The Direct Connect tips now say to leave **LAN Server** unticked (it's only for servers in LAN mode) · Installing or updating the server shows how much SteamCMD has written while its own messages are held back, instead of looking frozen · A fresh SteamCMD install now finishes in one click (it re-runs SteamCMD after it updates itself) · Two servers on one PC can no longer be mixed up when one folder name starts with the other (for example `VRisingServer` and `VRisingServer-Test`) |
 | 1.1.2 | Preset dropdowns list the game's real presets, read from your server (Game Settings Preset and a new Difficulty Preset), and default to blank · The old made-up preset names are cleared automatically · The All Waypoints Unlocked tooltip explains that waypoints only show on the map once their area is explored |
 | 1.1.1 | The mouse wheel scrolls a tab wherever the pointer is, not just over empty background · Scrolling over a number box or dropdown no longer changes its value · Server settings, admin list and ban list are kept in `save-data\Settings` (moved there automatically), so game updates can't reset them |
