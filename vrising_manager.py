@@ -3079,6 +3079,20 @@ class VRisingManager(tk.Tk):
         ttk.Spinbox(daily_frame, from_=1, to=60, textvariable=self.daily_warn_var,
                     width=4).pack(side="left", padx=(0,12))
 
+        min_up_lbl = tk.Label(daily_frame, text="Skip if up < (h):", bg=self.PANEL_BG,
+                              fg=self.TEXT, font=("Segoe UI", 9))
+        min_up_lbl.pack(side="left", padx=(0,4))
+        self.daily_min_uptime_var = tk.IntVar(value=self.cfg.get("daily_restart_min_uptime", 10))
+        min_up_spin = ttk.Spinbox(daily_frame, from_=0, to=23, textvariable=self.daily_min_uptime_var,
+                                  width=4)
+        min_up_spin.pack(side="left", padx=(0,12))
+        for w in (min_up_lbl, min_up_spin):
+            self._bind_tooltip(w,
+                "Skip the daily restart if the server was started less than this many hours\n"
+                "before it, for example after you restarted it yourself in the evening.\n"
+                "It restarts the next night instead. 0 = always restart.\n\n"
+                "Default: 10")
+
         self.daily_enabled_var = tk.BooleanVar(value=self.cfg.get("daily_restart_enabled", False))
         self.daily_toggle_btn = tk.Button(daily_frame, text="Enable Daily Restart",
                                            command=self._toggle_daily_restart,
@@ -3400,6 +3414,7 @@ class VRisingManager(tk.Tk):
             self.cfg["daily_restart_hour"]    = self.daily_hour_var.get()
             self.cfg["daily_restart_minute"]  = self.daily_minute_var.get()
             self.cfg["daily_restart_warn"]    = self.daily_warn_var.get()
+            self.cfg["daily_restart_min_uptime"] = self.daily_min_uptime_var.get()
             save_config(self.cfg)
         else:
             self._start_daily_restart_loop()
@@ -3418,6 +3433,7 @@ class VRisingManager(tk.Tk):
         self.cfg["daily_restart_hour"]    = h
         self.cfg["daily_restart_minute"]  = m
         self.cfg["daily_restart_warn"]    = self.daily_warn_var.get()
+        self.cfg["daily_restart_min_uptime"] = self.daily_min_uptime_var.get()
         save_config(self.cfg)
         t = threading.Thread(target=self._daily_restart_loop, daemon=True)
         t.start()
@@ -3475,9 +3491,12 @@ class VRisingManager(tk.Tk):
                 if getattr(self, "_daily_restart_cancel", False):
                     break
 
-                # Nothing to restart (and nobody to warn) if the server isn't running
-                if self._server_pid() is None:
-                    self._skip_daily_restart(target)
+                # Nothing to restart (and nobody to warn) if the server isn't running,
+                # and no need to if it was started only a few hours ago
+                pid = self._server_pid()
+                young = None if pid is None else self._recently_started(pid)
+                if pid is None or young:
+                    self._skip_daily_restart(target, young)
                     while (not getattr(self, "_daily_restart_cancel", False)
                            and datetime.datetime.now() < target + datetime.timedelta(seconds=90)):
                         time.sleep(15)
@@ -3573,10 +3592,32 @@ class VRisingManager(tk.Tk):
                 time.sleep(60)
                 continue
 
-    def _skip_daily_restart(self, target):
-        """Note a daily restart that was skipped because the server wasn't running."""
+    def _recently_started(self, pid):
+        """If the server started less than the daily restart's minimum uptime ago, describe how long
+        it's been up (for example "4h 12m"); otherwise None."""
+        try:
+            min_hours = int(self.cfg.get("daily_restart_min_uptime", 10))
+        except (TypeError, ValueError):
+            min_hours = 10
+        if min_hours <= 0:
+            return None
+        try:
+            up = time.time() - psutil.Process(pid).create_time()
+        except psutil.Error:
+            return None
+        if up >= min_hours * 3600:
+            return None
+        h, m = divmod(int(up) // 60, 60)
+        return f"{h}h {m:02d}m"
+
+    def _skip_daily_restart(self, target, uptime=None):
+        """Note a daily restart that was skipped: the server wasn't running, or (with uptime) it
+        had been started too recently to need one."""
         ts = target.strftime("%Y-%m-%d %H:%M")
-        if self._stopped_by_user:
+        if uptime:
+            why = (f"the server had only been running {uptime} "
+                   f"(less than {self.cfg.get('daily_restart_min_uptime', 10)}h)")
+        elif self._stopped_by_user:
             why = "the server was stopped from the manager"
         else:
             why = "the server wasn't running (it may have crashed or been closed outside the manager)"
