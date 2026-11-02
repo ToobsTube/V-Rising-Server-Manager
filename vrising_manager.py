@@ -144,7 +144,7 @@ DEFAULT_CONFIG = {
 }
 
 SERVER_EXE = "VRisingServer.exe"
-APP_VERSION = "1.1.4"   # keep in step with README.md and the GitHub release tag
+APP_VERSION = "1.1.5"   # keep in step with README.md and the GitHub release tag
 
 # Before 1.1.2 the preset dropdown offered these names, which aren't real V Rising presets
 # (the real ones are files in StreamingAssets/GameSettingPresets), so treat them as blank
@@ -153,6 +153,23 @@ _OLD_FAKE_PRESETS = {"Standard", "Relaxed", "Difficult", "Brutal"}
 
 def _clean_preset(name):
     return "" if not name or name in _OLD_FAKE_PRESETS else name
+
+# Castle limits the manager can change, all in ServerGameSettings.json's CastleStatModifiers_Global:
+# (config key, JSON key, label, game default, highest value offered, tooltip)
+CASTLE_LIMITS = [
+    ("castle_limit", "CastleLimit", "Castle Hearts per Player:", 2, 20,
+     "How many castle hearts each player can place.\n\n"
+     "Default: 2"),
+    ("tomb_limit", "TombLimit", "Tombs per Castle:", 12, 100,
+     "How many tombs each castle can have.\n\n"
+     "Default: 12"),
+    ("vermin_nest_limit", "VerminNestLimit", "Vermin Nests per Castle:", 4, 100,
+     "How many vermin nests each castle can have.\n\n"
+     "Default: 4"),
+    ("prison_cell_limit", "PrisonCellLimit", "Prison Cells per Castle:", 24, 200,
+     "How many prison cells each castle can have.\n\n"
+     "Default: 24"),
+]
 
 # Automatic restart: every day, or one day a week (index 1-7 = Monday-Sunday, like datetime.weekday() + 1)
 RESTART_DAYS = ["Every day", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -2199,6 +2216,20 @@ class VRisingManager(tk.Tk):
             pr_tip.grid(row=row, column=3, sticky="w", padx=(0,6))
             self._bind_tooltip(pr_tip, tip)
 
+        self._section(tab, 62, "Castle Limits")
+        self.castle_limit_vars = {}
+        for row, (key, _json_key, label, default, top, tip) in enumerate(CASTLE_LIMITS, start=64):
+            ttk.Label(tab, text=label, width=28, anchor="w").grid(
+                row=row, column=0, sticky="w", padx=(10,4), pady=5)
+            var = tk.IntVar(value=default)
+            ttk.Spinbox(tab, from_=1, to=top, textvariable=var, width=6).grid(
+                row=row, column=1, sticky="w", padx=4)
+            cl_tip = tk.Label(tab, text="ℹ", bg=self.PANEL_BG, fg=self.TEXT_DIM,
+                              font=("Segoe UI", 9), cursor="question_arrow")
+            cl_tip.grid(row=row, column=3, sticky="w", padx=(0,6))
+            self._bind_tooltip(cl_tip, tip)
+            self.castle_limit_vars[key] = var
+
     def _preset_choices(self, folder):
         """Blank plus the presets in the server's StreamingAssets/<folder>."""
         try:
@@ -4041,6 +4072,14 @@ class VRisingManager(tk.Tk):
         candidates.append(appdata)
         return candidates
 
+    def _castle_limits_from_file(self):
+        """CastleStatModifiers_Global from the server's settings file, or {} if there isn't one."""
+        for d in self._find_settings_dirs():
+            game = self._read_json_safe(os.path.join(d, "ServerGameSettings.json"))
+            if game:
+                return game.get("CastleStatModifiers_Global", {})
+        return {}
+
     # ── Import existing server JSON values into the UI ───────────────────────
     def _import_from_server_files(self):
         """
@@ -4140,6 +4179,9 @@ class VRisingManager(tk.Tk):
                 if "AllowGlobalChat"                 in game: self.global_chat_var.set(game["AllowGlobalChat"])
                 if "AllWaypointsUnlocked"            in game: self.all_waypoints_var.set(game["AllWaypointsUnlocked"])
                 if "ClanSize"                        in game: self.clan_size_var.set(game["ClanSize"])
+                csm = game.get("CastleStatModifiers_Global", {})
+                for key, json_key, *_ in CASTLE_LIMITS:
+                    if json_key in csm: self.castle_limit_vars[key].set(csm[json_key])
                 if "CastleRelocationEnabled"         in game: self.castle_reloc_var.set(game["CastleRelocationEnabled"])
                 if "CastleRelocationCooldown"        in game: self.castle_reloc_cooldown_var.set(int(game["CastleRelocationCooldown"]))
                 if "CastleMinimumDistanceInFloors"   in game: self.castle_min_dist_var.set(game["CastleMinimumDistanceInFloors"])
@@ -4261,6 +4303,14 @@ class VRisingManager(tk.Tk):
         self.global_chat_var.set(c.get("global_chat", True))
         self.all_waypoints_var.set(c.get("all_waypoints_unlocked", False))
         self.clan_size_var.set(c.get("clan_size", 4))
+        from_file = None
+        for key, json_key, _label, default, _top, _tip in CASTLE_LIMITS:
+            value = c.get(key)
+            if value is None:
+                if from_file is None:
+                    from_file = self._castle_limits_from_file()
+                value = from_file.get(json_key, default)
+            self.castle_limit_vars[key].set(value)
         self.castle_reloc_var.set(c.get("castle_relocation_enabled", True))
         self.castle_reloc_cooldown_var.set(c.get("castle_relocation_cooldown", 10800))
         self.castle_min_dist_var.set(c.get("castle_min_distance", 2))
@@ -4361,6 +4411,8 @@ class VRisingManager(tk.Tk):
         self.cfg["global_chat"]               = bool(self.global_chat_var.get())
         self.cfg["all_waypoints_unlocked"]    = bool(self.all_waypoints_var.get())
         self.cfg["clan_size"]                 = int(self.clan_size_var.get())
+        for key, var in self.castle_limit_vars.items():
+            self.cfg[key] = int(var.get())
         self.cfg["castle_relocation_enabled"] = bool(self.castle_reloc_var.get())
         self.cfg["castle_relocation_cooldown"]= int(self.castle_reloc_cooldown_var.get())
         self.cfg["castle_min_distance"]       = int(self.castle_min_dist_var.get())
@@ -4555,6 +4607,13 @@ class VRisingManager(tk.Tk):
         })
         game_settings["UnitStatModifiers_VBlood"] = vbm
 
+        csm = game_settings.get("CastleStatModifiers_Global", {})
+        for key, json_key, _label, _default, _top, _tip in CASTLE_LIMITS:
+            if self.cfg.get(key) is not None:
+                csm[json_key] = int(self.cfg[key])
+        if csm:
+            game_settings["CastleStatModifiers_Global"] = csm
+
         tm = game_settings.get("TraderModifiers", {})
         tm.update({
             "StockModifier":        self.cfg["trader_stock"],
@@ -4708,6 +4767,9 @@ class VRisingManager(tk.Tk):
             if "AllowGlobalChat"                 in game: self.global_chat_var.set(game["AllowGlobalChat"])
             if "AllWaypointsUnlocked"            in game: self.all_waypoints_var.set(game["AllWaypointsUnlocked"])
             if "ClanSize"                        in game: self.clan_size_var.set(game["ClanSize"])
+            csm = game.get("CastleStatModifiers_Global", {})
+            for key, json_key, *_ in CASTLE_LIMITS:
+                if json_key in csm: self.castle_limit_vars[key].set(csm[json_key])
             if "CastleRelocationEnabled"         in game: self.castle_reloc_var.set(game["CastleRelocationEnabled"])
             if "CastleRelocationCooldown"        in game: self.castle_reloc_cooldown_var.set(int(game["CastleRelocationCooldown"]))
             if "CastleMinimumDistanceInFloors"   in game: self.castle_min_dist_var.set(game["CastleMinimumDistanceInFloors"])
