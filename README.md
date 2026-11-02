@@ -2,7 +2,7 @@
 
 A lightweight GUI for managing your V Rising dedicated server on Windows.
 
-**Version 1.1.4** · By [ToobsTube]
+**Version 1.1.5** · By [ToobsTube]
 
 Also available as a standalone exe — no Python required.
 
@@ -74,7 +74,7 @@ On the **Network** tab. Shows your local IP and your public IP, with a button to
 > **Playing from the same house as the server?** Many home routers can't connect back to their own public address. Your server may then look high-latency, or be hidden by the server list's **Latency** filter, and Direct Connect to the public IP may fail. Loosen the Latency filter, or Direct Connect to the server PC's **local** IP (use the Copy button next to it) with **LAN Server** left unticked. That box is only for servers running in LAN mode. Players outside your home aren't affected.
 
 ### Game Settings
-Edit the most commonly changed server settings — player limits, PvP toggle, day/night cycle length, XP and resource multipliers, castle decay, and more — without opening a config file. Changes take effect the next time the server starts.
+Edit the most commonly changed server settings — player limits, PvP toggle, day/night cycle length, XP and resource multipliers, castle decay, castle limits (hearts per player, tombs, vermin nests, prison cells), castle size (floor tiles and servants per castle heart level, with a multiplier), and more — without opening a config file. Changes take effect the next time the server starts.
 
 ### Scheduled Restart
 Schedule a server restart or maintenance shutdown with automatic in-game announcements. Players receive warnings at 10, 5, 2, and 1 minute before the server stops.
@@ -85,7 +85,7 @@ The **Restart after shutdown** checkbox controls what happens when the countdown
 Set a time for the server to restart automatically, **every day** or once a week on the day you pick. Can be enabled or disabled at any time. If the server is already stopped at that time, the restart is skipped without sending warnings, and the tab notes whether it was stopped from the manager or may have crashed. **Skip if up < (h)** (default 10) also skips it when the server was started less than that many hours before, for example after you restarted it yourself in the evening; set it to 0 to always restart.
 
 ### Automated Backups
-Back up your world save on demand or on a schedule. Supports any local drive, network drive, or cloud-synced folder (OneDrive, Google Drive, Dropbox, etc.). Configure how often backups run and how many to keep.
+Back up your world save on demand or on a schedule. Supports any local drive, network drive, or cloud-synced folder (OneDrive, Google Drive, Dropbox, etc.). Configure how often backups run and how many to keep. A timed backup is skipped when nothing has changed since the last one, so a stopped server doesn't fill the slots with identical copies. If a backup fails, the reason shows in red until a later one works. Tick **Also back up during the automatic restart** to get a backup while the server is stopped, right after it saved the world.
 
 ### Themes
 Five built-in color themes: Dark Blue (default), Dark Green, Dark Red, Midnight Purple, and Light.
@@ -134,6 +134,7 @@ Enter the same password and port in the manager's **Setup tab** under the RCON s
 
 | Version | Notes |
 |---------|-------|
+| 1.1.5 | Auto-backup: failed backups now show in red with the reason (they used to fail silently), the last result stays visible, timed backups are skipped when nothing changed, a new option backs up during the automatic restart, and switching auto-backup off and on quickly can no longer leave two timers running · New **Castle Limits** section on the Players tab: castle hearts per player, tombs, vermin nests and prison cells. Values you set by hand in the settings file are read in, not reset · New **Castle Size** section: floor tiles and servants for each castle heart level, with a Floor Tiles Multiplier that turns off when you type your own tile counts and a Reset Tiles button · Inventory Stacks now stops at 3x, the most the game allows (higher values made the server log an error and use 3) |
 | 1.1.4 | The automatic restart can run every day or once a week on a chosen day · Turning it off and on again quickly can no longer leave two restart timers running (which restarted the server twice) · The daily restart no longer sends warnings or shows RCON errors when the server is already stopped; it skips quietly and says why (stopped from the manager, or possibly crashed) · New **Skip if up < (h)** setting (default 10): the daily restart is skipped when the server was started only a few hours before it · The Daily Restart tab keeps showing how the last restart went |
 | 1.1.3 | The Direct Connect tips now say to leave **LAN Server** unticked (it's only for servers in LAN mode) · Installing or updating the server shows how much SteamCMD has written while its own messages are held back, instead of looking frozen · A fresh SteamCMD install now finishes in one click (it re-runs SteamCMD after it updates itself) · Two servers on one PC can no longer be mixed up when one folder name starts with the other (for example `VRisingServer` and `VRisingServer-Test`) |
 | 1.1.2 | Preset dropdowns list the game's real presets, read from your server (Game Settings Preset and a new Difficulty Preset), and default to blank · The old made-up preset names are cleared automatically · The All Waypoints Unlocked tooltip explains that waypoints only show on the map once their area is explored |

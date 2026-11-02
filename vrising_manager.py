@@ -144,7 +144,7 @@ DEFAULT_CONFIG = {
 }
 
 SERVER_EXE = "VRisingServer.exe"
-APP_VERSION = "1.1.4"   # keep in step with README.md and the GitHub release tag
+APP_VERSION = "1.1.5"   # keep in step with README.md and the GitHub release tag
 
 # Before 1.1.2 the preset dropdown offered these names, which aren't real V Rising presets
 # (the real ones are files in StreamingAssets/GameSettingPresets), so treat them as blank
@@ -153,6 +153,66 @@ _OLD_FAKE_PRESETS = {"Standard", "Relaxed", "Difficult", "Brutal"}
 
 def _clean_preset(name):
     return "" if not name or name in _OLD_FAKE_PRESETS else name
+
+# The game won't take an InventoryStacksModifier above 3 (it logs an error and uses 3)
+INVENTORY_STACKS_MAX = 3.0
+
+
+def _clamp_stacks(value):
+    try:
+        return max(0.1, min(INVENTORY_STACKS_MAX, float(value)))
+    except (TypeError, ValueError):
+        return 1.0
+
+# Castle limits the manager can change, all in ServerGameSettings.json's CastleStatModifiers_Global:
+# (config key, JSON key, label, game default, highest value offered, tooltip)
+CASTLE_LIMITS = [
+    ("castle_limit", "CastleLimit", "Castle Hearts per Player:", 2, 20,
+     "How many castle hearts each player can place.\n\n"
+     "Default: 2"),
+    ("tomb_limit", "TombLimit", "Tombs per Castle:", 12, 100,
+     "How many tombs each castle can have.\n\n"
+     "Default: 12"),
+    ("vermin_nest_limit", "VerminNestLimit", "Vermin Nests per Castle:", 4, 100,
+     "How many vermin nests each castle can have.\n\n"
+     "Default: 4"),
+    ("prison_cell_limit", "PrisonCellLimit", "Prison Cells per Castle:", 24, 200,
+     "How many prison cells each castle can have.\n\n"
+     "Default: 24"),
+]
+
+def _save_fingerprint(folder):
+    """Number of files, total size and newest change time under folder: if none of these
+    moved, the save hasn't changed and another backup would be an identical copy."""
+    count = size = newest = 0
+    for dp, _, files in os.walk(folder):
+        for f in files:
+            try:
+                st = os.stat(os.path.join(dp, f))
+            except OSError:
+                continue
+            count += 1
+            size += st.st_size
+            newest = max(newest, int(st.st_mtime))
+    return f"{count}:{size}:{newest}"
+
+# Castle size per heart level (CastleStatModifiers_Global > HeartLimits > Level1-Level5):
+# the game's default (floor tiles, servants) for each level
+HEART_LEVEL_DEFAULTS = [(50, 1), (140, 3), (240, 5), (360, 7), (550, 8)]
+FLOOR_MULT_MIN, FLOOR_MULT_MAX = 0.5, 5.0
+
+
+def _floors_for(mult):
+    """Floor tiles for each heart level at this multiplier of the game defaults."""
+    return [max(1, round(f * mult)) for f, _ in HEART_LEVEL_DEFAULTS]
+
+
+def _floor_mult_of(floors):
+    """The multiplier these floor tiles were made with, or None if they were set by hand."""
+    m = round(floors[0] / HEART_LEVEL_DEFAULTS[0][0], 1)
+    if FLOOR_MULT_MIN <= m <= FLOOR_MULT_MAX and list(floors) == _floors_for(m):
+        return m
+    return None
 
 # Automatic restart: every day, or one day a week (index 1-7 = Monday-Sunday, like datetime.weekday() + 1)
 RESTART_DAYS = ["Every day", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -1702,8 +1762,8 @@ class VRisingManager(tk.Tk):
                          "Affects Soul Shard drop rates from VBlood bosses")
         self._slider_row(tab, 21, "Blood Essence Yield", self.blood_essence_yield_var, 0.1,  5.0, 0.1, "{:.1f}", "x",
                          "How much blood essence enemies drop — used to fuel your castle heart")
-        self._slider_row(tab, 22, "Inventory Stacks",    self.inventory_stacks_var,    0.1,  5.0, 0.1, "{:.1f}", "x",
-                         "Multiplies max stack size for items in your inventory")
+        self._slider_row(tab, 22, "Inventory Stacks",    self.inventory_stacks_var,    0.1,  INVENTORY_STACKS_MAX, 0.1, "{:.1f}", "x",
+                         "Multiplies max stack size for items in your inventory (the game allows up to 3x)")
 
         self._section(tab, 23, "Crafting & Building")
         self.build_cost_var      = tk.DoubleVar()
@@ -2198,6 +2258,71 @@ class VRisingManager(tk.Tk):
                               font=("Segoe UI", 9), cursor="question_arrow")
             pr_tip.grid(row=row, column=3, sticky="w", padx=(0,6))
             self._bind_tooltip(pr_tip, tip)
+
+        self._section(tab, 62, "Castle Limits")
+        self.castle_limit_vars = {}
+        for row, (key, _json_key, label, default, top, tip) in enumerate(CASTLE_LIMITS, start=64):
+            ttk.Label(tab, text=label, width=28, anchor="w").grid(
+                row=row, column=0, sticky="w", padx=(10,4), pady=5)
+            var = tk.IntVar(value=default)
+            ttk.Spinbox(tab, from_=1, to=top, textvariable=var, width=6).grid(
+                row=row, column=1, sticky="w", padx=4)
+            cl_tip = tk.Label(tab, text="ℹ", bg=self.PANEL_BG, fg=self.TEXT_DIM,
+                              font=("Segoe UI", 9), cursor="question_arrow")
+            cl_tip.grid(row=row, column=3, sticky="w", padx=(0,6))
+            self._bind_tooltip(cl_tip, tip)
+            self.castle_limit_vars[key] = var
+
+        self._section(tab, 68, "Castle Size  (per castle heart level)")
+        self._floor_custom = False
+        self._setting_floors = False
+        self.floor_mult_var = tk.DoubleVar(value=1.0)
+        self.floor_mult_scale = self._slider_row(
+            tab, 70, "Floor Tiles Multiplier", self.floor_mult_var,
+            FLOOR_MULT_MIN, FLOOR_MULT_MAX, 0.1, "{:.1f}", "x",
+            "Multiplies the floor tiles every castle heart level allows.\n"
+            "Turns off when you type your own numbers below; Reset Tiles turns it back on.\n\n"
+            "Default: 1.0x (50 / 140 / 240 / 360 / 550 tiles)")
+        self.floor_mult_var.trace_add("write", lambda *_: self._on_floor_mult())
+
+        lv = tk.Frame(tab, bg=self.PANEL_BG)
+        lv.grid(row=71, column=0, columnspan=4, sticky="w", padx=(10,4), pady=(2,2))
+        tk.Label(lv, text="Heart level:", bg=self.PANEL_BG, fg=self.TEXT_DIM,
+                 font=("Segoe UI", 9), width=12, anchor="w").grid(row=0, column=0, sticky="w")
+        tk.Label(lv, text="Floor tiles:", bg=self.PANEL_BG, fg=self.TEXT,
+                 font=("Segoe UI", 9), width=12, anchor="w").grid(row=1, column=0, sticky="w", pady=2)
+        tk.Label(lv, text="Servants:", bg=self.PANEL_BG, fg=self.TEXT,
+                 font=("Segoe UI", 9), width=12, anchor="w").grid(row=2, column=0, sticky="w", pady=2)
+        self.floor_vars, self.servant_vars = [], []
+        for i, (floors, servants) in enumerate(HEART_LEVEL_DEFAULTS):
+            tk.Label(lv, text=str(i + 1), bg=self.PANEL_BG, fg=self.TEXT_DIM,
+                     font=("Segoe UI", 9)).grid(row=0, column=i + 1)
+            fv, sv = tk.IntVar(value=floors), tk.IntVar(value=servants)
+            ttk.Spinbox(lv, from_=1, to=5000, increment=10, textvariable=fv, width=6).grid(
+                row=1, column=i + 1, padx=3, pady=2)
+            ttk.Spinbox(lv, from_=0, to=50, textvariable=sv, width=6).grid(
+                row=2, column=i + 1, padx=3, pady=2)
+            fv.trace_add("write", lambda *_: self._on_floor_edit())
+            self.floor_vars.append(fv)
+            self.servant_vars.append(sv)
+        lv_tip = tk.Label(lv, text="ℹ", bg=self.PANEL_BG, fg=self.TEXT_DIM,
+                          font=("Segoe UI", 9), cursor="question_arrow")
+        lv_tip.grid(row=1, column=6, rowspan=2, sticky="w", padx=(8,0))
+        self._bind_tooltip(lv_tip,
+            "How big a castle can be at each castle heart level, and how many\n"
+            "servants it can have. Servants aren't multiplied; set them here.\n\n"
+            "Default floor tiles: 50 / 140 / 240 / 360 / 550\n"
+            "Default servants: 1 / 3 / 5 / 7 / 8")
+
+        st = tk.Frame(tab, bg=self.PANEL_BG)
+        st.grid(row=72, column=0, columnspan=4, sticky="w", padx=(10,4), pady=(2,8))
+        tk.Button(st, text="↺  Reset Tiles", command=self._reset_floor_tiles,
+                  bg="#0d2b0d", fg=self.GREEN, relief="flat",
+                  font=("Segoe UI", 8, "bold"), padx=10, pady=3, cursor="hand2").pack(side="left")
+        self.floor_mode_lbl = tk.Label(st, text="", bg=self.PANEL_BG, fg=self.TEXT_DIM,
+                                       font=("Segoe UI", 8))
+        self.floor_mode_lbl.pack(side="left", padx=(10,0))
+        self._set_floor_custom(False)
 
     def _preset_choices(self, folder):
         """Blank plus the presets in the server's StreamingAssets/<folder>."""
@@ -3131,7 +3256,7 @@ class VRisingManager(tk.Tk):
 
         self.daily_status = tk.Label(outer, text="Automatic restart is disabled.",
                                       bg=self.PANEL_BG, fg=self.TEXT_DIM,
-                                      font=("Segoe UI", 8))
+                                      font=("Segoe UI", 8), justify="left")
         self.daily_status.grid(row=11, column=0, sticky="w", padx=14, pady=(0,2))
 
         self.daily_error_lbl = tk.Label(outer, text="",
@@ -3220,8 +3345,21 @@ class VRisingManager(tk.Tk):
             relief="flat", font=("Segoe UI", 9, "bold"), padx=14, pady=4, cursor="hand2")
         self.backup_sched_btn.pack(side="left")
 
+        self.backup_on_restart_var = tk.BooleanVar(value=self.cfg.get("backup_on_restart", False))
+        bor = ttk.Checkbutton(sched_bk_btn_row, variable=self.backup_on_restart_var,
+                              text="Also back up during the automatic restart",
+                              command=self._save_backup_on_restart)
+        bor.pack(side="left", padx=(14,0))
+        self._bind_tooltip(bor,
+            "Makes a backup while the automatic restart has the server stopped,\n"
+            "right after it saved the world, before starting it again.\n"
+            "That's the cleanest copy you can get: nothing is writing to the save.\n"
+            "Works even when the timed auto-backup above is off.\n\n"
+            "Default: off")
+
         self.backup_sched_status = tk.Label(outer, text="", bg=self.PANEL_BG,
-                                             fg=self.TEXT_DIM, font=("Segoe UI", 8))
+                                             fg=self.TEXT_DIM, font=("Segoe UI", 8),
+                                             justify="left", wraplength=640)
         self.backup_sched_status.grid(row=21, column=0, sticky="w", padx=14, pady=(0,6))
 
         # Restore schedule if it was enabled last session
@@ -3602,6 +3740,12 @@ class VRisingManager(tk.Tk):
                     continue
                 self.after(0, lambda: self._set_status("stopped"))
                 time.sleep(5)
+                backup_note = ""
+                if self.cfg.get("backup_on_restart"):
+                    self.after(0, lambda: self.daily_status.config(
+                        text="Automatic restart: backing up before starting the server...", fg=self.TEXT_DIM))
+                    _ok, note = self._auto_backup("automatic restart")
+                    backup_note = f", backup {note}"
                 self._start_server()
                 restart_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
                 save_note = {
@@ -3611,7 +3755,7 @@ class VRisingManager(tk.Tk):
                     "not_running": "server had already stopped",
                 }.get(result, result)
                 self._write_restart_log(
-                    f"SUCCESS — daily restart completed at {restart_time} ({save_note})")
+                    f"SUCCESS — daily restart completed at {restart_time} ({save_note}{backup_note})")
                 self._daily_last_note = f"restarted at {restart_time[-5:]} ({save_note})"
                 self.after(0, lambda rt=restart_time: self.daily_status.config(
                     text=f"Last restart completed at {rt}. Next {_restart_when(day, h, m)}.",
@@ -3715,12 +3859,11 @@ class VRisingManager(tk.Tk):
 
         def do_backup():
             try:
-                shutil.copytree(src, dest)
-                size_mb = sum(
-                    os.path.getsize(os.path.join(dp, f))
-                    for dp, _, files in os.walk(dest) for f in files
-                ) / (1024 * 1024)
+                fingerprint = _save_fingerprint(src)
+                size_mb = self._copy_backup(src, dest)
                 self._prune_old_backups(dest_root)
+                self.cfg["backup_last_fingerprint"] = fingerprint
+                save_config(self.cfg)
                 msg = f"✓ Backup complete — {size_mb:.1f} MB → {dest}"
                 self.after(0, lambda: self.backup_status.config(text=msg, fg=self.GREEN))
                 self.after(0, self._refresh_backup_list)
@@ -3845,6 +3988,72 @@ class VRisingManager(tk.Tk):
             except Exception:
                 pass
 
+    def _save_backup_on_restart(self):
+        self.cfg["backup_on_restart"] = bool(self.backup_on_restart_var.get())
+        save_config(self.cfg)
+
+    def _backup_dest_root(self):
+        """The backup folder, the same default the Backup to: box shows."""
+        return os.path.normpath(self.cfg.get("backup_dest") or os.path.join(
+            os.path.expanduser("~"), "Desktop", "VRising_Backups"))
+
+    @staticmethod
+    def _copy_backup(src, dest):
+        """Copy save-data to dest; returns its size in MB."""
+        shutil.copytree(src, dest)
+        return sum(os.path.getsize(os.path.join(dp, f))
+                   for dp, _, files in os.walk(dest) for f in files) / (1024 * 1024)
+
+    def _auto_backup(self, why):
+        """Back up save-data unless nothing has changed since the last backup.
+        Runs on a background thread; returns a short note for the "Last:" line and the restart log."""
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        src = os.path.join(os.path.normpath(self.cfg.get("server_path", "") or "."), "save-data")
+        if not os.path.isdir(src):
+            ok, note = False, f"FAILED at {stamp} ({why}): no save-data folder at {src}"
+        else:
+            fingerprint = _save_fingerprint(src)
+            if fingerprint == self.cfg.get("backup_last_fingerprint"):
+                ok, note = True, f"skipped at {stamp} ({why}): nothing changed since the last backup"
+            else:
+                dest_root = self._backup_dest_root()
+                dest = os.path.join(dest_root, f"VRising_backup_{datetime.now():%Y-%m-%d_%H-%M-%S}")
+                try:
+                    os.makedirs(dest_root, exist_ok=True)
+                    size_mb = self._copy_backup(src, dest)
+                    self._prune_old_backups(dest_root)
+                    self.cfg["backup_last_fingerprint"] = fingerprint
+                    save_config(self.cfg)
+                    ok, note = True, f"backed up at {stamp} ({why}), {size_mb:.0f} MB"
+                except Exception as e:
+                    ok, note = False, f"FAILED at {stamp} ({why}): {e}"
+        self._backup_last = (ok, note)
+        try:
+            self.after(0, self._show_backup_status)
+            self.after(0, self._refresh_backup_list)
+        except RuntimeError:
+            pass  # window closed
+        return ok, note
+
+    def _show_backup_status(self):
+        """Countdown (when the timed backup is on) plus how the last automatic backup went.
+        A failed one is shown in red until a later backup works."""
+        lines = []
+        if self.backup_sched_enabled.get() and getattr(self, "_backup_sched_next", None):
+            total_sec = max(0, int((self._backup_sched_next - datetime.now()).total_seconds()))
+            hrs, rem = divmod(total_sec, 3600)
+            lines.append(f"Next auto-backup in {hrs}h {rem // 60:02d}m")
+        elif not self.backup_sched_enabled.get():
+            lines.append("Auto-backup disabled.")
+        ok, note = getattr(self, "_backup_last", (True, ""))
+        if note:
+            lines.append(f"Last: {note}")
+        try:
+            self.backup_sched_status.config(
+                text="\n".join(lines), fg=self.TEXT_DIM if ok else self.ACCENT)
+        except (RuntimeError, tk.TclError):
+            pass  # window closed
+
     def _toggle_backup_schedule(self):
         """Enable or disable the auto-backup schedule and persist the choice."""
         enabled = not self.backup_sched_enabled.get()
@@ -3860,69 +4069,34 @@ class VRisingManager(tk.Tk):
         else:
             self.backup_sched_btn.config(
                 text="▶  Enable Auto-Backup", bg=self.GREEN, fg="#0d1b2a")
-            self.backup_sched_status.config(
-                text="Auto-backup disabled.", fg=self.TEXT_DIM)
+            self._show_backup_status()
 
     def _start_backup_schedule_loop(self):
-        """Kick off the background loop that fires a backup every N hours."""
+        """Kick off the timer that fires a backup every N hours. Each start gets a new number
+        and older timers stop, so switching it off and on quickly can't leave two running."""
         interval_hours = max(1, self.backup_interval_var.get())
         self._backup_sched_next = datetime.now() + timedelta(hours=interval_hours)
-        self._backup_schedule_tick()
+        self._backup_timer_gen = getattr(self, "_backup_timer_gen", 0) + 1
+        self._backup_schedule_tick(self._backup_timer_gen)
 
-    def _backup_schedule_tick(self):
+    def _backup_schedule_tick(self, gen=None):
         """Called every 60 s; fires a backup when the scheduled time arrives."""
         if not self.backup_sched_enabled.get():
             return  # schedule was disabled — stop ticking
-        now = datetime.now()
-        remaining = self._backup_sched_next - now
-        total_sec = max(0, int(remaining.total_seconds()))
-        hrs, rem  = divmod(total_sec, 3600)
-        mins      = rem // 60
-        try:
-            self.backup_sched_status.config(
-                text=f"Next auto-backup in {hrs}h {mins:02d}m", fg=self.TEXT_DIM)
-        except RuntimeError:
-            return  # window closed
-
-        if now >= self._backup_sched_next:
+        if gen is not None and gen != getattr(self, "_backup_timer_gen", gen):
+            return  # a newer timer has taken over
+        if datetime.now() >= self._backup_sched_next:
             # Time to back up — reset timer first, then run backup
             interval_hours = max(1, self.backup_interval_var.get())
-            self._backup_sched_next = now + timedelta(hours=interval_hours)
-            self._run_scheduled_backup()
+            self._backup_sched_next = datetime.now() + timedelta(hours=interval_hours)
+            threading.Thread(target=self._auto_backup, args=("scheduled",), daemon=True).start()
+        self._show_backup_status()
 
         # Re-schedule this tick in 60 s
         try:
-            self.after(60_000, self._backup_schedule_tick)
+            self.after(60_000, lambda: self._backup_schedule_tick(gen))
         except RuntimeError:
             pass  # window closed
-
-    def _run_scheduled_backup(self):
-        """Perform a backup triggered by the schedule (silent, no popup on errors)."""
-        base = os.path.normpath(self.path_var.get().strip())
-        src  = os.path.join(base, "save-data")
-        if not os.path.isdir(src):
-            return
-        dest_root = os.path.normpath(self.backup_dest_var.get().strip())
-        if not dest_root:
-            return
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        dest = os.path.join(dest_root, f"VRising_backup_{timestamp}")
-
-        def do_backup():
-            try:
-                shutil.copytree(src, dest)
-                self._prune_old_backups(dest_root)
-                msg = f"Auto-backup at {timestamp} ✓"
-                try:
-                    self.after(0, lambda: self.backup_sched_status.config(
-                        text=msg, fg=self.GREEN))
-                    self.after(0, self._refresh_backup_list)
-                except RuntimeError:
-                    pass
-            except Exception:
-                pass  # silent on scheduled errors
-
-        threading.Thread(target=do_backup, daemon=True).start()
 
     # ── Log tail methods ─────────────────────────────────────────────────────
     def _get_log_path(self):
@@ -4041,6 +4215,71 @@ class VRisingManager(tk.Tk):
         candidates.append(appdata)
         return candidates
 
+    def _set_floor_custom(self, custom):
+        """Custom tile counts switch the multiplier off until Reset Tiles."""
+        self._floor_custom = custom
+        self.floor_mult_scale.state(["disabled"] if custom else ["!disabled"])
+        self.floor_mode_lbl.config(
+            text="Custom tile counts: the multiplier is off. Reset Tiles turns it back on." if custom
+                 else "Tiles follow the multiplier. Typing your own numbers turns it off.",
+            fg=self.YELLOW if custom else self.TEXT_DIM)
+
+    def _on_floor_mult(self):
+        if self._setting_floors or self._floor_custom:
+            return
+        try:
+            mult = round(float(self.floor_mult_var.get()), 1)
+        except (tk.TclError, ValueError):
+            return
+        self._setting_floors = True
+        for var, floors in zip(self.floor_vars, _floors_for(mult)):
+            var.set(floors)
+        self._setting_floors = False
+
+    def _on_floor_edit(self):
+        if not self._setting_floors and not self._floor_custom:
+            self._set_floor_custom(True)
+
+    def _reset_floor_tiles(self):
+        """Back to the game's default tiles, with the multiplier on again at 1.0x."""
+        self._set_floor_custom(False)
+        self._setting_floors = True
+        self.floor_mult_var.set(1.0)
+        self._setting_floors = False
+        self._on_floor_mult()
+
+    def _show_heart_levels(self, floors, servants, mult=None, custom=None):
+        """Put tile and servant counts in the boxes; work out the multiplier if it isn't known."""
+        if custom is None:
+            mult = _floor_mult_of(floors)
+            custom = mult is None
+        self._setting_floors = True
+        for var, value in zip(self.floor_vars, floors):
+            var.set(value)
+        for var, value in zip(self.servant_vars, servants):
+            var.set(value)
+        self.floor_mult_var.set(mult if mult else 1.0)
+        self._setting_floors = False
+        self._set_floor_custom(custom)
+
+    @staticmethod
+    def _heart_levels_in(heart_limits):
+        """Floor tiles and servants per level from a HeartLimits section, with game defaults for gaps."""
+        floors, servants = [], []
+        for i, (f, sv) in enumerate(HEART_LEVEL_DEFAULTS):
+            lvl = heart_limits.get(f"Level{i + 1}", {}) if isinstance(heart_limits, dict) else {}
+            floors.append(int(lvl.get("FloorLimit", f)))
+            servants.append(int(lvl.get("ServantLimit", sv)))
+        return floors, servants
+
+    def _castle_limits_from_file(self):
+        """CastleStatModifiers_Global from the server's settings file, or {} if there isn't one."""
+        for d in self._find_settings_dirs():
+            game = self._read_json_safe(os.path.join(d, "ServerGameSettings.json"))
+            if game:
+                return game.get("CastleStatModifiers_Global", {})
+        return {}
+
     # ── Import existing server JSON values into the UI ───────────────────────
     def _import_from_server_files(self):
         """
@@ -4119,7 +4358,7 @@ class VRisingManager(tk.Tk):
                 if "MaterialYieldModifier_Global"    in game: self.resource_var.set(game["MaterialYieldModifier_Global"])
                 if "SoulShardModifier"               in game: self.shard_var.set(game["SoulShardModifier"])
                 if "BloodEssenceYieldModifier"       in game: self.blood_essence_yield_var.set(game["BloodEssenceYieldModifier"])
-                if "InventoryStacksModifier"         in game: self.inventory_stacks_var.set(game["InventoryStacksModifier"])
+                if "InventoryStacksModifier"         in game: self.inventory_stacks_var.set(_clamp_stacks(game["InventoryStacksModifier"]))
                 if "BuildCostModifier"               in game: self.build_cost_var.set(game["BuildCostModifier"])
                 if "CraftRateModifier"               in game: self.craft_rate_var.set(game["CraftRateModifier"])
                 if "RecipeCostModifier"              in game: self.recipe_cost_var.set(game["RecipeCostModifier"])
@@ -4140,6 +4379,10 @@ class VRisingManager(tk.Tk):
                 if "AllowGlobalChat"                 in game: self.global_chat_var.set(game["AllowGlobalChat"])
                 if "AllWaypointsUnlocked"            in game: self.all_waypoints_var.set(game["AllWaypointsUnlocked"])
                 if "ClanSize"                        in game: self.clan_size_var.set(game["ClanSize"])
+                csm = game.get("CastleStatModifiers_Global", {})
+                for key, json_key, *_ in CASTLE_LIMITS:
+                    if json_key in csm: self.castle_limit_vars[key].set(csm[json_key])
+                if "HeartLimits" in csm: self._show_heart_levels(*self._heart_levels_in(csm["HeartLimits"]))
                 if "CastleRelocationEnabled"         in game: self.castle_reloc_var.set(game["CastleRelocationEnabled"])
                 if "CastleRelocationCooldown"        in game: self.castle_reloc_cooldown_var.set(int(game["CastleRelocationCooldown"]))
                 if "CastleMinimumDistanceInFloors"   in game: self.castle_min_dist_var.set(game["CastleMinimumDistanceInFloors"])
@@ -4229,7 +4472,7 @@ class VRisingManager(tk.Tk):
         self.resource_var.set(c["resource_yield_modifier"])
         self.shard_var.set(c["soul_shard_modifier"])
         self.blood_essence_yield_var.set(c.get("blood_essence_yield", 1.0))
-        self.inventory_stacks_var.set(c.get("inventory_stacks", 1.0))
+        self.inventory_stacks_var.set(_clamp_stacks(c.get("inventory_stacks", 1.0)))
         self.build_cost_var.set(c.get("build_cost", 1.0))
         self.craft_rate_var.set(c.get("craft_rate", 1.0))
         self.recipe_cost_var.set(c.get("recipe_cost", 1.0))
@@ -4261,6 +4504,22 @@ class VRisingManager(tk.Tk):
         self.global_chat_var.set(c.get("global_chat", True))
         self.all_waypoints_var.set(c.get("all_waypoints_unlocked", False))
         self.clan_size_var.set(c.get("clan_size", 4))
+        from_file = None
+        for key, json_key, _label, default, _top, _tip in CASTLE_LIMITS:
+            value = c.get(key)
+            if value is None:
+                if from_file is None:
+                    from_file = self._castle_limits_from_file()
+                value = from_file.get(json_key, default)
+            self.castle_limit_vars[key].set(value)
+        levels = c.get("castle_heart_levels")
+        if levels:
+            self._show_heart_levels([lv[0] for lv in levels], [lv[1] for lv in levels],
+                                    c.get("castle_floor_mult", 1.0), bool(c.get("castle_floor_custom")))
+        else:
+            if from_file is None:
+                from_file = self._castle_limits_from_file()
+            self._show_heart_levels(*self._heart_levels_in(from_file.get("HeartLimits", {})))
         self.castle_reloc_var.set(c.get("castle_relocation_enabled", True))
         self.castle_reloc_cooldown_var.set(c.get("castle_relocation_cooldown", 10800))
         self.castle_min_dist_var.set(c.get("castle_min_distance", 2))
@@ -4361,6 +4620,17 @@ class VRisingManager(tk.Tk):
         self.cfg["global_chat"]               = bool(self.global_chat_var.get())
         self.cfg["all_waypoints_unlocked"]    = bool(self.all_waypoints_var.get())
         self.cfg["clan_size"]                 = int(self.clan_size_var.get())
+        for key, var in self.castle_limit_vars.items():
+            self.cfg[key] = int(var.get())
+        levels = []
+        for var, sv_var, (f, sv) in zip(self.floor_vars, self.servant_vars, HEART_LEVEL_DEFAULTS):
+            try:
+                levels.append([max(1, int(var.get())), max(0, int(sv_var.get()))])
+            except (tk.TclError, ValueError):
+                levels.append([f, sv])
+        self.cfg["castle_heart_levels"] = levels
+        self.cfg["castle_floor_mult"]   = round(float(self.floor_mult_var.get()), 1)
+        self.cfg["castle_floor_custom"] = self._floor_custom
         self.cfg["castle_relocation_enabled"] = bool(self.castle_reloc_var.get())
         self.cfg["castle_relocation_cooldown"]= int(self.castle_reloc_cooldown_var.get())
         self.cfg["castle_min_distance"]       = int(self.castle_min_dist_var.get())
@@ -4503,7 +4773,7 @@ class VRisingManager(tk.Tk):
             "PlayerXPRate":                    self.cfg["xp_multiplier"],
             "SoulShardModifier":               self.cfg["soul_shard_modifier"],
             "BloodEssenceYieldModifier":       self.cfg["blood_essence_yield"],
-            "InventoryStacksModifier":         self.cfg["inventory_stacks"],
+            "InventoryStacksModifier":         _clamp_stacks(self.cfg["inventory_stacks"]),
             "BuildCostModifier":               self.cfg["build_cost"],
             "CraftRateModifier":               self.cfg["craft_rate"],
             "RecipeCostModifier":              self.cfg["recipe_cost"],
@@ -4554,6 +4824,22 @@ class VRisingManager(tk.Tk):
             "LevelIncrease":     self.cfg["vblood_level"],
         })
         game_settings["UnitStatModifiers_VBlood"] = vbm
+
+        csm = game_settings.get("CastleStatModifiers_Global", {})
+        for key, json_key, _label, _default, _top, _tip in CASTLE_LIMITS:
+            if self.cfg.get(key) is not None:
+                csm[json_key] = int(self.cfg[key])
+        levels = self.cfg.get("castle_heart_levels")
+        if levels:
+            hl = csm.get("HeartLimits", {})
+            for i, (floors, servants) in enumerate(levels):
+                lvl = hl.get(f"Level{i + 1}", {"HeightLimit": 3})
+                lvl["FloorLimit"] = int(floors)
+                lvl["ServantLimit"] = int(servants)
+                hl[f"Level{i + 1}"] = lvl
+            csm["HeartLimits"] = hl
+        if csm:
+            game_settings["CastleStatModifiers_Global"] = csm
 
         tm = game_settings.get("TraderModifiers", {})
         tm.update({
@@ -4687,7 +4973,7 @@ class VRisingManager(tk.Tk):
             if "MaterialYieldModifier_Global"    in game: self.resource_var.set(game["MaterialYieldModifier_Global"])
             if "SoulShardModifier"               in game: self.shard_var.set(game["SoulShardModifier"])
             if "BloodEssenceYieldModifier"       in game: self.blood_essence_yield_var.set(game["BloodEssenceYieldModifier"])
-            if "InventoryStacksModifier"         in game: self.inventory_stacks_var.set(game["InventoryStacksModifier"])
+            if "InventoryStacksModifier"         in game: self.inventory_stacks_var.set(_clamp_stacks(game["InventoryStacksModifier"]))
             if "BuildCostModifier"               in game: self.build_cost_var.set(game["BuildCostModifier"])
             if "CraftRateModifier"               in game: self.craft_rate_var.set(game["CraftRateModifier"])
             if "RecipeCostModifier"              in game: self.recipe_cost_var.set(game["RecipeCostModifier"])
@@ -4708,6 +4994,10 @@ class VRisingManager(tk.Tk):
             if "AllowGlobalChat"                 in game: self.global_chat_var.set(game["AllowGlobalChat"])
             if "AllWaypointsUnlocked"            in game: self.all_waypoints_var.set(game["AllWaypointsUnlocked"])
             if "ClanSize"                        in game: self.clan_size_var.set(game["ClanSize"])
+            csm = game.get("CastleStatModifiers_Global", {})
+            for key, json_key, *_ in CASTLE_LIMITS:
+                if json_key in csm: self.castle_limit_vars[key].set(csm[json_key])
+            if "HeartLimits" in csm: self._show_heart_levels(*self._heart_levels_in(csm["HeartLimits"]))
             if "CastleRelocationEnabled"         in game: self.castle_reloc_var.set(game["CastleRelocationEnabled"])
             if "CastleRelocationCooldown"        in game: self.castle_reloc_cooldown_var.set(int(game["CastleRelocationCooldown"]))
             if "CastleMinimumDistanceInFloors"   in game: self.castle_min_dist_var.set(game["CastleMinimumDistanceInFloors"])
