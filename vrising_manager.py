@@ -181,6 +181,24 @@ CASTLE_LIMITS = [
      "Default: 24"),
 ]
 
+# Castle size per heart level (CastleStatModifiers_Global > HeartLimits > Level1-Level5):
+# the game's default (floor tiles, servants) for each level
+HEART_LEVEL_DEFAULTS = [(50, 1), (140, 3), (240, 5), (360, 7), (550, 8)]
+FLOOR_MULT_MIN, FLOOR_MULT_MAX = 0.5, 5.0
+
+
+def _floors_for(mult):
+    """Floor tiles for each heart level at this multiplier of the game defaults."""
+    return [max(1, round(f * mult)) for f, _ in HEART_LEVEL_DEFAULTS]
+
+
+def _floor_mult_of(floors):
+    """The multiplier these floor tiles were made with, or None if they were set by hand."""
+    m = round(floors[0] / HEART_LEVEL_DEFAULTS[0][0], 1)
+    if FLOOR_MULT_MIN <= m <= FLOOR_MULT_MAX and list(floors) == _floors_for(m):
+        return m
+    return None
+
 # Automatic restart: every day, or one day a week (index 1-7 = Monday-Sunday, like datetime.weekday() + 1)
 RESTART_DAYS = ["Every day", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
@@ -2240,6 +2258,57 @@ class VRisingManager(tk.Tk):
             self._bind_tooltip(cl_tip, tip)
             self.castle_limit_vars[key] = var
 
+        self._section(tab, 68, "Castle Size  (per castle heart level)")
+        self._floor_custom = False
+        self._setting_floors = False
+        self.floor_mult_var = tk.DoubleVar(value=1.0)
+        self.floor_mult_scale = self._slider_row(
+            tab, 70, "Floor Tiles Multiplier", self.floor_mult_var,
+            FLOOR_MULT_MIN, FLOOR_MULT_MAX, 0.1, "{:.1f}", "x",
+            "Multiplies the floor tiles every castle heart level allows.\n"
+            "Turns off when you type your own numbers below; Reset Tiles turns it back on.\n\n"
+            "Default: 1.0x (50 / 140 / 240 / 360 / 550 tiles)")
+        self.floor_mult_var.trace_add("write", lambda *_: self._on_floor_mult())
+
+        lv = tk.Frame(tab, bg=self.PANEL_BG)
+        lv.grid(row=71, column=0, columnspan=4, sticky="w", padx=(10,4), pady=(2,2))
+        tk.Label(lv, text="Heart level:", bg=self.PANEL_BG, fg=self.TEXT_DIM,
+                 font=("Segoe UI", 9), width=12, anchor="w").grid(row=0, column=0, sticky="w")
+        tk.Label(lv, text="Floor tiles:", bg=self.PANEL_BG, fg=self.TEXT,
+                 font=("Segoe UI", 9), width=12, anchor="w").grid(row=1, column=0, sticky="w", pady=2)
+        tk.Label(lv, text="Servants:", bg=self.PANEL_BG, fg=self.TEXT,
+                 font=("Segoe UI", 9), width=12, anchor="w").grid(row=2, column=0, sticky="w", pady=2)
+        self.floor_vars, self.servant_vars = [], []
+        for i, (floors, servants) in enumerate(HEART_LEVEL_DEFAULTS):
+            tk.Label(lv, text=str(i + 1), bg=self.PANEL_BG, fg=self.TEXT_DIM,
+                     font=("Segoe UI", 9)).grid(row=0, column=i + 1)
+            fv, sv = tk.IntVar(value=floors), tk.IntVar(value=servants)
+            ttk.Spinbox(lv, from_=1, to=5000, increment=10, textvariable=fv, width=6).grid(
+                row=1, column=i + 1, padx=3, pady=2)
+            ttk.Spinbox(lv, from_=0, to=50, textvariable=sv, width=6).grid(
+                row=2, column=i + 1, padx=3, pady=2)
+            fv.trace_add("write", lambda *_: self._on_floor_edit())
+            self.floor_vars.append(fv)
+            self.servant_vars.append(sv)
+        lv_tip = tk.Label(lv, text="ℹ", bg=self.PANEL_BG, fg=self.TEXT_DIM,
+                          font=("Segoe UI", 9), cursor="question_arrow")
+        lv_tip.grid(row=1, column=6, rowspan=2, sticky="w", padx=(8,0))
+        self._bind_tooltip(lv_tip,
+            "How big a castle can be at each castle heart level, and how many\n"
+            "servants it can have. Servants aren't multiplied; set them here.\n\n"
+            "Default floor tiles: 50 / 140 / 240 / 360 / 550\n"
+            "Default servants: 1 / 3 / 5 / 7 / 8")
+
+        st = tk.Frame(tab, bg=self.PANEL_BG)
+        st.grid(row=72, column=0, columnspan=4, sticky="w", padx=(10,4), pady=(2,8))
+        tk.Button(st, text="↺  Reset Tiles", command=self._reset_floor_tiles,
+                  bg="#0d2b0d", fg=self.GREEN, relief="flat",
+                  font=("Segoe UI", 8, "bold"), padx=10, pady=3, cursor="hand2").pack(side="left")
+        self.floor_mode_lbl = tk.Label(st, text="", bg=self.PANEL_BG, fg=self.TEXT_DIM,
+                                       font=("Segoe UI", 8))
+        self.floor_mode_lbl.pack(side="left", padx=(10,0))
+        self._set_floor_custom(False)
+
     def _preset_choices(self, folder):
         """Blank plus the presets in the server's StreamingAssets/<folder>."""
         try:
@@ -4082,6 +4151,63 @@ class VRisingManager(tk.Tk):
         candidates.append(appdata)
         return candidates
 
+    def _set_floor_custom(self, custom):
+        """Custom tile counts switch the multiplier off until Reset Tiles."""
+        self._floor_custom = custom
+        self.floor_mult_scale.state(["disabled"] if custom else ["!disabled"])
+        self.floor_mode_lbl.config(
+            text="Custom tile counts: the multiplier is off. Reset Tiles turns it back on." if custom
+                 else "Tiles follow the multiplier. Typing your own numbers turns it off.",
+            fg=self.YELLOW if custom else self.TEXT_DIM)
+
+    def _on_floor_mult(self):
+        if self._setting_floors or self._floor_custom:
+            return
+        try:
+            mult = round(float(self.floor_mult_var.get()), 1)
+        except (tk.TclError, ValueError):
+            return
+        self._setting_floors = True
+        for var, floors in zip(self.floor_vars, _floors_for(mult)):
+            var.set(floors)
+        self._setting_floors = False
+
+    def _on_floor_edit(self):
+        if not self._setting_floors and not self._floor_custom:
+            self._set_floor_custom(True)
+
+    def _reset_floor_tiles(self):
+        """Back to the game's default tiles, with the multiplier on again at 1.0x."""
+        self._set_floor_custom(False)
+        self._setting_floors = True
+        self.floor_mult_var.set(1.0)
+        self._setting_floors = False
+        self._on_floor_mult()
+
+    def _show_heart_levels(self, floors, servants, mult=None, custom=None):
+        """Put tile and servant counts in the boxes; work out the multiplier if it isn't known."""
+        if custom is None:
+            mult = _floor_mult_of(floors)
+            custom = mult is None
+        self._setting_floors = True
+        for var, value in zip(self.floor_vars, floors):
+            var.set(value)
+        for var, value in zip(self.servant_vars, servants):
+            var.set(value)
+        self.floor_mult_var.set(mult if mult else 1.0)
+        self._setting_floors = False
+        self._set_floor_custom(custom)
+
+    @staticmethod
+    def _heart_levels_in(heart_limits):
+        """Floor tiles and servants per level from a HeartLimits section, with game defaults for gaps."""
+        floors, servants = [], []
+        for i, (f, sv) in enumerate(HEART_LEVEL_DEFAULTS):
+            lvl = heart_limits.get(f"Level{i + 1}", {}) if isinstance(heart_limits, dict) else {}
+            floors.append(int(lvl.get("FloorLimit", f)))
+            servants.append(int(lvl.get("ServantLimit", sv)))
+        return floors, servants
+
     def _castle_limits_from_file(self):
         """CastleStatModifiers_Global from the server's settings file, or {} if there isn't one."""
         for d in self._find_settings_dirs():
@@ -4192,6 +4318,7 @@ class VRisingManager(tk.Tk):
                 csm = game.get("CastleStatModifiers_Global", {})
                 for key, json_key, *_ in CASTLE_LIMITS:
                     if json_key in csm: self.castle_limit_vars[key].set(csm[json_key])
+                if "HeartLimits" in csm: self._show_heart_levels(*self._heart_levels_in(csm["HeartLimits"]))
                 if "CastleRelocationEnabled"         in game: self.castle_reloc_var.set(game["CastleRelocationEnabled"])
                 if "CastleRelocationCooldown"        in game: self.castle_reloc_cooldown_var.set(int(game["CastleRelocationCooldown"]))
                 if "CastleMinimumDistanceInFloors"   in game: self.castle_min_dist_var.set(game["CastleMinimumDistanceInFloors"])
@@ -4321,6 +4448,14 @@ class VRisingManager(tk.Tk):
                     from_file = self._castle_limits_from_file()
                 value = from_file.get(json_key, default)
             self.castle_limit_vars[key].set(value)
+        levels = c.get("castle_heart_levels")
+        if levels:
+            self._show_heart_levels([lv[0] for lv in levels], [lv[1] for lv in levels],
+                                    c.get("castle_floor_mult", 1.0), bool(c.get("castle_floor_custom")))
+        else:
+            if from_file is None:
+                from_file = self._castle_limits_from_file()
+            self._show_heart_levels(*self._heart_levels_in(from_file.get("HeartLimits", {})))
         self.castle_reloc_var.set(c.get("castle_relocation_enabled", True))
         self.castle_reloc_cooldown_var.set(c.get("castle_relocation_cooldown", 10800))
         self.castle_min_dist_var.set(c.get("castle_min_distance", 2))
@@ -4423,6 +4558,15 @@ class VRisingManager(tk.Tk):
         self.cfg["clan_size"]                 = int(self.clan_size_var.get())
         for key, var in self.castle_limit_vars.items():
             self.cfg[key] = int(var.get())
+        levels = []
+        for var, sv_var, (f, sv) in zip(self.floor_vars, self.servant_vars, HEART_LEVEL_DEFAULTS):
+            try:
+                levels.append([max(1, int(var.get())), max(0, int(sv_var.get()))])
+            except (tk.TclError, ValueError):
+                levels.append([f, sv])
+        self.cfg["castle_heart_levels"] = levels
+        self.cfg["castle_floor_mult"]   = round(float(self.floor_mult_var.get()), 1)
+        self.cfg["castle_floor_custom"] = self._floor_custom
         self.cfg["castle_relocation_enabled"] = bool(self.castle_reloc_var.get())
         self.cfg["castle_relocation_cooldown"]= int(self.castle_reloc_cooldown_var.get())
         self.cfg["castle_min_distance"]       = int(self.castle_min_dist_var.get())
@@ -4621,6 +4765,15 @@ class VRisingManager(tk.Tk):
         for key, json_key, _label, _default, _top, _tip in CASTLE_LIMITS:
             if self.cfg.get(key) is not None:
                 csm[json_key] = int(self.cfg[key])
+        levels = self.cfg.get("castle_heart_levels")
+        if levels:
+            hl = csm.get("HeartLimits", {})
+            for i, (floors, servants) in enumerate(levels):
+                lvl = hl.get(f"Level{i + 1}", {"HeightLimit": 3})
+                lvl["FloorLimit"] = int(floors)
+                lvl["ServantLimit"] = int(servants)
+                hl[f"Level{i + 1}"] = lvl
+            csm["HeartLimits"] = hl
         if csm:
             game_settings["CastleStatModifiers_Global"] = csm
 
@@ -4780,6 +4933,7 @@ class VRisingManager(tk.Tk):
             csm = game.get("CastleStatModifiers_Global", {})
             for key, json_key, *_ in CASTLE_LIMITS:
                 if json_key in csm: self.castle_limit_vars[key].set(csm[json_key])
+            if "HeartLimits" in csm: self._show_heart_levels(*self._heart_levels_in(csm["HeartLimits"]))
             if "CastleRelocationEnabled"         in game: self.castle_reloc_var.set(game["CastleRelocationEnabled"])
             if "CastleRelocationCooldown"        in game: self.castle_reloc_cooldown_var.set(int(game["CastleRelocationCooldown"]))
             if "CastleMinimumDistanceInFloors"   in game: self.castle_min_dist_var.set(game["CastleMinimumDistanceInFloors"])
