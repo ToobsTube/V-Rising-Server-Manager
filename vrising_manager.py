@@ -181,6 +181,21 @@ CASTLE_LIMITS = [
      "Default: 24"),
 ]
 
+def _save_fingerprint(folder):
+    """Number of files, total size and newest change time under folder: if none of these
+    moved, the save hasn't changed and another backup would be an identical copy."""
+    count = size = newest = 0
+    for dp, _, files in os.walk(folder):
+        for f in files:
+            try:
+                st = os.stat(os.path.join(dp, f))
+            except OSError:
+                continue
+            count += 1
+            size += st.st_size
+            newest = max(newest, int(st.st_mtime))
+    return f"{count}:{size}:{newest}"
+
 # Castle size per heart level (CastleStatModifiers_Global > HeartLimits > Level1-Level5):
 # the game's default (floor tiles, servants) for each level
 HEART_LEVEL_DEFAULTS = [(50, 1), (140, 3), (240, 5), (360, 7), (550, 8)]
@@ -3241,7 +3256,7 @@ class VRisingManager(tk.Tk):
 
         self.daily_status = tk.Label(outer, text="Automatic restart is disabled.",
                                       bg=self.PANEL_BG, fg=self.TEXT_DIM,
-                                      font=("Segoe UI", 8))
+                                      font=("Segoe UI", 8), justify="left")
         self.daily_status.grid(row=11, column=0, sticky="w", padx=14, pady=(0,2))
 
         self.daily_error_lbl = tk.Label(outer, text="",
@@ -3330,8 +3345,21 @@ class VRisingManager(tk.Tk):
             relief="flat", font=("Segoe UI", 9, "bold"), padx=14, pady=4, cursor="hand2")
         self.backup_sched_btn.pack(side="left")
 
+        self.backup_on_restart_var = tk.BooleanVar(value=self.cfg.get("backup_on_restart", False))
+        bor = ttk.Checkbutton(sched_bk_btn_row, variable=self.backup_on_restart_var,
+                              text="Also back up during the automatic restart",
+                              command=self._save_backup_on_restart)
+        bor.pack(side="left", padx=(14,0))
+        self._bind_tooltip(bor,
+            "Makes a backup while the automatic restart has the server stopped,\n"
+            "right after it saved the world, before starting it again.\n"
+            "That's the cleanest copy you can get: nothing is writing to the save.\n"
+            "Works even when the timed auto-backup above is off.\n\n"
+            "Default: off")
+
         self.backup_sched_status = tk.Label(outer, text="", bg=self.PANEL_BG,
-                                             fg=self.TEXT_DIM, font=("Segoe UI", 8))
+                                             fg=self.TEXT_DIM, font=("Segoe UI", 8),
+                                             justify="left", wraplength=640)
         self.backup_sched_status.grid(row=21, column=0, sticky="w", padx=14, pady=(0,6))
 
         # Restore schedule if it was enabled last session
@@ -3712,6 +3740,12 @@ class VRisingManager(tk.Tk):
                     continue
                 self.after(0, lambda: self._set_status("stopped"))
                 time.sleep(5)
+                backup_note = ""
+                if self.cfg.get("backup_on_restart"):
+                    self.after(0, lambda: self.daily_status.config(
+                        text="Automatic restart: backing up before starting the server...", fg=self.TEXT_DIM))
+                    _ok, note = self._auto_backup("automatic restart")
+                    backup_note = f", backup {note}"
                 self._start_server()
                 restart_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
                 save_note = {
@@ -3721,7 +3755,7 @@ class VRisingManager(tk.Tk):
                     "not_running": "server had already stopped",
                 }.get(result, result)
                 self._write_restart_log(
-                    f"SUCCESS — daily restart completed at {restart_time} ({save_note})")
+                    f"SUCCESS — daily restart completed at {restart_time} ({save_note}{backup_note})")
                 self._daily_last_note = f"restarted at {restart_time[-5:]} ({save_note})"
                 self.after(0, lambda rt=restart_time: self.daily_status.config(
                     text=f"Last restart completed at {rt}. Next {_restart_when(day, h, m)}.",
@@ -3825,12 +3859,11 @@ class VRisingManager(tk.Tk):
 
         def do_backup():
             try:
-                shutil.copytree(src, dest)
-                size_mb = sum(
-                    os.path.getsize(os.path.join(dp, f))
-                    for dp, _, files in os.walk(dest) for f in files
-                ) / (1024 * 1024)
+                fingerprint = _save_fingerprint(src)
+                size_mb = self._copy_backup(src, dest)
                 self._prune_old_backups(dest_root)
+                self.cfg["backup_last_fingerprint"] = fingerprint
+                save_config(self.cfg)
                 msg = f"✓ Backup complete — {size_mb:.1f} MB → {dest}"
                 self.after(0, lambda: self.backup_status.config(text=msg, fg=self.GREEN))
                 self.after(0, self._refresh_backup_list)
@@ -3955,6 +3988,72 @@ class VRisingManager(tk.Tk):
             except Exception:
                 pass
 
+    def _save_backup_on_restart(self):
+        self.cfg["backup_on_restart"] = bool(self.backup_on_restart_var.get())
+        save_config(self.cfg)
+
+    def _backup_dest_root(self):
+        """The backup folder, the same default the Backup to: box shows."""
+        return os.path.normpath(self.cfg.get("backup_dest") or os.path.join(
+            os.path.expanduser("~"), "Desktop", "VRising_Backups"))
+
+    @staticmethod
+    def _copy_backup(src, dest):
+        """Copy save-data to dest; returns its size in MB."""
+        shutil.copytree(src, dest)
+        return sum(os.path.getsize(os.path.join(dp, f))
+                   for dp, _, files in os.walk(dest) for f in files) / (1024 * 1024)
+
+    def _auto_backup(self, why):
+        """Back up save-data unless nothing has changed since the last backup.
+        Runs on a background thread; returns a short note for the "Last:" line and the restart log."""
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        src = os.path.join(os.path.normpath(self.cfg.get("server_path", "") or "."), "save-data")
+        if not os.path.isdir(src):
+            ok, note = False, f"FAILED at {stamp} ({why}): no save-data folder at {src}"
+        else:
+            fingerprint = _save_fingerprint(src)
+            if fingerprint == self.cfg.get("backup_last_fingerprint"):
+                ok, note = True, f"skipped at {stamp} ({why}): nothing changed since the last backup"
+            else:
+                dest_root = self._backup_dest_root()
+                dest = os.path.join(dest_root, f"VRising_backup_{datetime.now():%Y-%m-%d_%H-%M-%S}")
+                try:
+                    os.makedirs(dest_root, exist_ok=True)
+                    size_mb = self._copy_backup(src, dest)
+                    self._prune_old_backups(dest_root)
+                    self.cfg["backup_last_fingerprint"] = fingerprint
+                    save_config(self.cfg)
+                    ok, note = True, f"backed up at {stamp} ({why}), {size_mb:.0f} MB"
+                except Exception as e:
+                    ok, note = False, f"FAILED at {stamp} ({why}): {e}"
+        self._backup_last = (ok, note)
+        try:
+            self.after(0, self._show_backup_status)
+            self.after(0, self._refresh_backup_list)
+        except RuntimeError:
+            pass  # window closed
+        return ok, note
+
+    def _show_backup_status(self):
+        """Countdown (when the timed backup is on) plus how the last automatic backup went.
+        A failed one is shown in red until a later backup works."""
+        lines = []
+        if self.backup_sched_enabled.get() and getattr(self, "_backup_sched_next", None):
+            total_sec = max(0, int((self._backup_sched_next - datetime.now()).total_seconds()))
+            hrs, rem = divmod(total_sec, 3600)
+            lines.append(f"Next auto-backup in {hrs}h {rem // 60:02d}m")
+        elif not self.backup_sched_enabled.get():
+            lines.append("Auto-backup disabled.")
+        ok, note = getattr(self, "_backup_last", (True, ""))
+        if note:
+            lines.append(f"Last: {note}")
+        try:
+            self.backup_sched_status.config(
+                text="\n".join(lines), fg=self.TEXT_DIM if ok else self.ACCENT)
+        except (RuntimeError, tk.TclError):
+            pass  # window closed
+
     def _toggle_backup_schedule(self):
         """Enable or disable the auto-backup schedule and persist the choice."""
         enabled = not self.backup_sched_enabled.get()
@@ -3970,69 +4069,34 @@ class VRisingManager(tk.Tk):
         else:
             self.backup_sched_btn.config(
                 text="▶  Enable Auto-Backup", bg=self.GREEN, fg="#0d1b2a")
-            self.backup_sched_status.config(
-                text="Auto-backup disabled.", fg=self.TEXT_DIM)
+            self._show_backup_status()
 
     def _start_backup_schedule_loop(self):
-        """Kick off the background loop that fires a backup every N hours."""
+        """Kick off the timer that fires a backup every N hours. Each start gets a new number
+        and older timers stop, so switching it off and on quickly can't leave two running."""
         interval_hours = max(1, self.backup_interval_var.get())
         self._backup_sched_next = datetime.now() + timedelta(hours=interval_hours)
-        self._backup_schedule_tick()
+        self._backup_timer_gen = getattr(self, "_backup_timer_gen", 0) + 1
+        self._backup_schedule_tick(self._backup_timer_gen)
 
-    def _backup_schedule_tick(self):
+    def _backup_schedule_tick(self, gen=None):
         """Called every 60 s; fires a backup when the scheduled time arrives."""
         if not self.backup_sched_enabled.get():
             return  # schedule was disabled — stop ticking
-        now = datetime.now()
-        remaining = self._backup_sched_next - now
-        total_sec = max(0, int(remaining.total_seconds()))
-        hrs, rem  = divmod(total_sec, 3600)
-        mins      = rem // 60
-        try:
-            self.backup_sched_status.config(
-                text=f"Next auto-backup in {hrs}h {mins:02d}m", fg=self.TEXT_DIM)
-        except RuntimeError:
-            return  # window closed
-
-        if now >= self._backup_sched_next:
+        if gen is not None and gen != getattr(self, "_backup_timer_gen", gen):
+            return  # a newer timer has taken over
+        if datetime.now() >= self._backup_sched_next:
             # Time to back up — reset timer first, then run backup
             interval_hours = max(1, self.backup_interval_var.get())
-            self._backup_sched_next = now + timedelta(hours=interval_hours)
-            self._run_scheduled_backup()
+            self._backup_sched_next = datetime.now() + timedelta(hours=interval_hours)
+            threading.Thread(target=self._auto_backup, args=("scheduled",), daemon=True).start()
+        self._show_backup_status()
 
         # Re-schedule this tick in 60 s
         try:
-            self.after(60_000, self._backup_schedule_tick)
+            self.after(60_000, lambda: self._backup_schedule_tick(gen))
         except RuntimeError:
             pass  # window closed
-
-    def _run_scheduled_backup(self):
-        """Perform a backup triggered by the schedule (silent, no popup on errors)."""
-        base = os.path.normpath(self.path_var.get().strip())
-        src  = os.path.join(base, "save-data")
-        if not os.path.isdir(src):
-            return
-        dest_root = os.path.normpath(self.backup_dest_var.get().strip())
-        if not dest_root:
-            return
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        dest = os.path.join(dest_root, f"VRising_backup_{timestamp}")
-
-        def do_backup():
-            try:
-                shutil.copytree(src, dest)
-                self._prune_old_backups(dest_root)
-                msg = f"Auto-backup at {timestamp} ✓"
-                try:
-                    self.after(0, lambda: self.backup_sched_status.config(
-                        text=msg, fg=self.GREEN))
-                    self.after(0, self._refresh_backup_list)
-                except RuntimeError:
-                    pass
-            except Exception:
-                pass  # silent on scheduled errors
-
-        threading.Thread(target=do_backup, daemon=True).start()
 
     # ── Log tail methods ─────────────────────────────────────────────────────
     def _get_log_path(self):
