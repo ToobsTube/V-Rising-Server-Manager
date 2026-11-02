@@ -154,6 +154,16 @@ _OLD_FAKE_PRESETS = {"Standard", "Relaxed", "Difficult", "Brutal"}
 def _clean_preset(name):
     return "" if not name or name in _OLD_FAKE_PRESETS else name
 
+# The game won't take an InventoryStacksModifier above 3 (it logs an error and uses 3)
+INVENTORY_STACKS_MAX = 3.0
+
+
+def _clamp_stacks(value):
+    try:
+        return max(0.1, min(INVENTORY_STACKS_MAX, float(value)))
+    except (TypeError, ValueError):
+        return 1.0
+
 # Castle limits the manager can change, all in ServerGameSettings.json's CastleStatModifiers_Global:
 # (config key, JSON key, label, game default, highest value offered, tooltip)
 CASTLE_LIMITS = [
@@ -1719,8 +1729,8 @@ class VRisingManager(tk.Tk):
                          "Affects Soul Shard drop rates from VBlood bosses")
         self._slider_row(tab, 21, "Blood Essence Yield", self.blood_essence_yield_var, 0.1,  5.0, 0.1, "{:.1f}", "x",
                          "How much blood essence enemies drop — used to fuel your castle heart")
-        self._slider_row(tab, 22, "Inventory Stacks",    self.inventory_stacks_var,    0.1,  5.0, 0.1, "{:.1f}", "x",
-                         "Multiplies max stack size for items in your inventory")
+        self._slider_row(tab, 22, "Inventory Stacks",    self.inventory_stacks_var,    0.1,  INVENTORY_STACKS_MAX, 0.1, "{:.1f}", "x",
+                         "Multiplies max stack size for items in your inventory (the game allows up to 3x)")
 
         self._section(tab, 23, "Crafting & Building")
         self.build_cost_var      = tk.DoubleVar()
@@ -4158,7 +4168,7 @@ class VRisingManager(tk.Tk):
                 if "MaterialYieldModifier_Global"    in game: self.resource_var.set(game["MaterialYieldModifier_Global"])
                 if "SoulShardModifier"               in game: self.shard_var.set(game["SoulShardModifier"])
                 if "BloodEssenceYieldModifier"       in game: self.blood_essence_yield_var.set(game["BloodEssenceYieldModifier"])
-                if "InventoryStacksModifier"         in game: self.inventory_stacks_var.set(game["InventoryStacksModifier"])
+                if "InventoryStacksModifier"         in game: self.inventory_stacks_var.set(_clamp_stacks(game["InventoryStacksModifier"]))
                 if "BuildCostModifier"               in game: self.build_cost_var.set(game["BuildCostModifier"])
                 if "CraftRateModifier"               in game: self.craft_rate_var.set(game["CraftRateModifier"])
                 if "RecipeCostModifier"              in game: self.recipe_cost_var.set(game["RecipeCostModifier"])
@@ -4271,7 +4281,7 @@ class VRisingManager(tk.Tk):
         self.resource_var.set(c["resource_yield_modifier"])
         self.shard_var.set(c["soul_shard_modifier"])
         self.blood_essence_yield_var.set(c.get("blood_essence_yield", 1.0))
-        self.inventory_stacks_var.set(c.get("inventory_stacks", 1.0))
+        self.inventory_stacks_var.set(_clamp_stacks(c.get("inventory_stacks", 1.0)))
         self.build_cost_var.set(c.get("build_cost", 1.0))
         self.craft_rate_var.set(c.get("craft_rate", 1.0))
         self.recipe_cost_var.set(c.get("recipe_cost", 1.0))
@@ -4555,7 +4565,7 @@ class VRisingManager(tk.Tk):
             "PlayerXPRate":                    self.cfg["xp_multiplier"],
             "SoulShardModifier":               self.cfg["soul_shard_modifier"],
             "BloodEssenceYieldModifier":       self.cfg["blood_essence_yield"],
-            "InventoryStacksModifier":         self.cfg["inventory_stacks"],
+            "InventoryStacksModifier":         _clamp_stacks(self.cfg["inventory_stacks"]),
             "BuildCostModifier":               self.cfg["build_cost"],
             "CraftRateModifier":               self.cfg["craft_rate"],
             "RecipeCostModifier":              self.cfg["recipe_cost"],
@@ -4746,7 +4756,7 @@ class VRisingManager(tk.Tk):
             if "MaterialYieldModifier_Global"    in game: self.resource_var.set(game["MaterialYieldModifier_Global"])
             if "SoulShardModifier"               in game: self.shard_var.set(game["SoulShardModifier"])
             if "BloodEssenceYieldModifier"       in game: self.blood_essence_yield_var.set(game["BloodEssenceYieldModifier"])
-            if "InventoryStacksModifier"         in game: self.inventory_stacks_var.set(game["InventoryStacksModifier"])
+            if "InventoryStacksModifier"         in game: self.inventory_stacks_var.set(_clamp_stacks(game["InventoryStacksModifier"]))
             if "BuildCostModifier"               in game: self.build_cost_var.set(game["BuildCostModifier"])
             if "CraftRateModifier"               in game: self.craft_rate_var.set(game["CraftRateModifier"])
             if "RecipeCostModifier"              in game: self.recipe_cost_var.set(game["RecipeCostModifier"])
